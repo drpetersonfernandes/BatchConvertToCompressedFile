@@ -227,6 +227,7 @@ public partial class MainWindow : IDisposable
             var successCount = 0;
             var failureCount = 0;
 
+            var skippedCount = 0;
             for (var i = 0; i < files.Length; i++)
             {
                 if (_cts.Token.IsCancellationRequested)
@@ -237,6 +238,16 @@ public partial class MainWindow : IDisposable
 
                 var inputFile = files[i];
                 var fileName = Path.GetFileNameWithoutExtension(inputFile);
+
+                // Check if the file is already compressed
+                if (IsCompressedFile(inputFile))
+                {
+                    LogMessage($"[{i + 1}/{files.Length}] Skipping already compressed file: {Path.GetFileName(inputFile)}");
+                    skippedCount++;
+                    ProgressBar.Value = i + 1;
+                    continue;
+                }
+
                 var outputFile = Path.Combine(outputFolder, fileName + "." + compressionFormat);
 
                 if (File.Exists(outputFile))
@@ -284,6 +295,11 @@ public partial class MainWindow : IDisposable
             LogMessage("");
             LogMessage("Batch compression completed.");
             LogMessage($"Successfully compressed: {successCount} files");
+            if (skippedCount > 0)
+            {
+                LogMessage($"Skipped (already compressed): {skippedCount} files");
+            }
+
             if (failureCount > 0)
             {
                 LogMessage($"Failed to compress: {failureCount} files");
@@ -291,6 +307,7 @@ public partial class MainWindow : IDisposable
 
             ShowMessageBox($"Batch compression completed.\n\n" +
                            $"Successfully compressed: {successCount} files\n" +
+                           (skippedCount > 0 ? $"Skipped (already compressed): {skippedCount} files\n" : "") +
                            $"Failed to compress: {failureCount} files",
                 "Compression Complete", MessageBoxButton.OK,
                 failureCount > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
@@ -450,6 +467,17 @@ public partial class MainWindow : IDisposable
         {
             return Path.Combine(appDirectory, "7z_x86.exe");
         }
+    }
+
+    /// <summary>
+    /// Checks if a file has a compression file extension
+    /// </summary>
+    /// <param name="filePath">Path to the file to check</param>
+    /// <returns>True if the file has a compression extension (.rar, .zip, or .7z), otherwise false</returns>
+    private static bool IsCompressedFile(string filePath)
+    {
+        var extension = Path.GetExtension(filePath)?.ToLowerInvariant();
+        return extension is ".rar" or ".zip" or ".7z";
     }
 
     public void Dispose()
