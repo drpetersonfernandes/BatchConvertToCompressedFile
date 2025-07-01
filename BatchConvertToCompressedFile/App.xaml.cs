@@ -12,12 +12,25 @@ public partial class App : IDisposable
 
     public App()
     {
-        SharedBugReportService = new BugReportService(AppConfig.BugReportApiUrl, AppConfig.BugReportApiKey, AppConfig.ApplicationName);
-        _bugReportService = SharedBugReportService;
+        BugReportService? bugReportService = null;
+        try
+        {
+            bugReportService = new BugReportService(AppConfig.BugReportApiUrl, AppConfig.BugReportApiKey,
+                AppConfig.ApplicationName);
+            SharedBugReportService = bugReportService;
+            _bugReportService = SharedBugReportService;
 
-        AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
-        DispatcherUnhandledException += App_DispatcherUnhandledException;
-        TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
+            DispatcherUnhandledException += App_DispatcherUnhandledException;
+            TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+        }
+        catch
+        {
+            // If initialization fails, ensure proper cleanup
+            bugReportService?.Dispose();
+            SharedBugReportService = null;
+            throw;
+        }
     }
 
     private void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)

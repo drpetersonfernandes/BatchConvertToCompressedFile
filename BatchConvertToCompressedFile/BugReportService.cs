@@ -27,7 +27,7 @@ public class BugReportService(string apiUrl, string apiKey, string applicationNa
                 applicationName = _applicationName
             });
 
-            var response = await _httpClient.PostAsync(_apiUrl, content);
+            using var response = await _httpClient.PostAsync(_apiUrl, content);
             return response.IsSuccessStatusCode;
         }
         catch
