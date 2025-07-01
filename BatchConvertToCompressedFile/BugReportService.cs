@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 
 namespace BatchConvertToCompressedFile;
 
+/// <inheritdoc />
 /// <summary>
 /// Service responsible for sending bug reports to the BugReport API
 /// </summary>
@@ -19,13 +20,13 @@ public class BugReportService(string apiUrl, string apiKey, string applicationNa
         {
             _httpClient.DefaultRequestHeaders.Clear();
             _httpClient.DefaultRequestHeaders.Add("X-API-KEY", _apiKey);
-            
+
             var content = JsonContent.Create(new
             {
                 message,
                 applicationName = _applicationName
             });
-            
+
             var response = await _httpClient.PostAsync(_apiUrl, content);
             return response.IsSuccessStatusCode;
         }

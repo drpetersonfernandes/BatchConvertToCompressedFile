@@ -39,7 +39,7 @@ public partial class AboutWindow
 
             MessageBox.Show($"Unable to open link: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
-        
+
         e.Handled = true;
     }
 

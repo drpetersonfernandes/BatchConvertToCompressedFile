@@ -7,14 +7,14 @@ namespace BatchConvertToCompressedFile;
 public partial class App : IDisposable
 {
     private readonly BugReportService? _bugReportService;
-    
+
     public static BugReportService? SharedBugReportService { get; private set; }
 
     public App()
     {
         SharedBugReportService = new BugReportService(AppConfig.BugReportApiUrl, AppConfig.BugReportApiKey, AppConfig.ApplicationName);
         _bugReportService = SharedBugReportService;
-        
+
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
         DispatcherUnhandledException += App_DispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
@@ -33,8 +33,6 @@ public partial class App : IDisposable
         ReportException(e.Exception, "Application.DispatcherUnhandledException");
         e.Handled = true;
     }
-
-
 
     private void TaskScheduler_UnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
     {
@@ -83,7 +81,7 @@ public partial class App : IDisposable
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{exception.StackTrace}");
 
             if (exception.InnerException == null) break;
-            
+
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Inner Exception:");
             exception = exception.InnerException;
             level += 1;
@@ -94,11 +92,11 @@ public partial class App : IDisposable
     {
         _bugReportService?.Dispose();
         SharedBugReportService = null;
-        
+
         AppDomain.CurrentDomain.UnhandledException -= CurrentDomain_UnhandledException;
         DispatcherUnhandledException -= App_DispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException -= TaskScheduler_UnobservedTaskException;
-        
+
         GC.SuppressFinalize(this);
     }
 }
