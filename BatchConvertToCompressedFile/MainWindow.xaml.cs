@@ -2,497 +2,870 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Controls;
 using Microsoft.Win32;
+using SevenZipExtractor;
 
 namespace BatchConvertToCompressedFile;
 
 public partial class MainWindow : IDisposable
 {
     private CancellationTokenSource _cts;
-    private readonly BugReportService _bugReportService;
-    private readonly string _sevenZipPath; // Path to the appropriate 7z executable
 
-    // Bug Report API configuration
-    private const string BugReportApiUrl = "https://www.purelogiccode.com/bugreport/api/send-bug-report";
-    private const string BugReportApiKey = "hjh7yu6t56tyr540o9u8767676r5674534453235264c75b6t7ggghgg76trf564e";
-    private const string ApplicationName = "BatchConvertToCompressedFile";
+    private readonly string _sevenZipPath;
+    private readonly bool _isSevenZipAvailable;
+
+    private static readonly string[] AllSupportedVerificationExtensions = { ".zip", ".7z", ".rar" };
+
+    private int _currentDegreeOfParallelismForFiles = 1;
+
+    // Statistics
+    private int _totalFilesProcessed;
+    private int _processedOkCount;
+    private int _failedCount;
+    private readonly Stopwatch _operationTimer = new();
+
+    // For Write Speed Calculation
+    private const int WriteSpeedUpdateIntervalMs = 1000;
 
     public MainWindow()
     {
         InitializeComponent();
         _cts = new CancellationTokenSource();
 
-        // Initialize the bug report service
-        _bugReportService = new BugReportService(BugReportApiUrl, BugReportApiKey, ApplicationName);
+        var appDirectory = AppDomain.CurrentDomain.BaseDirectory;
+        _sevenZipPath = Path.Combine(appDirectory, "7z.exe");
+        _isSevenZipAvailable = File.Exists(_sevenZipPath);
 
-        LogMessage("Welcome to the Batch Convert to Compressed File.");
+        DisplayCompressionInstructionsInLog();
+        ResetOperationStats();
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalidChars = Regex.Escape(new string(Path.GetInvalidFileNameChars()));
+        var invalidRegStr = string.Format(CultureInfo.InvariantCulture, @"([{0}]*\.+$)|([{0}]+)", invalidChars);
+        return Regex.Replace(name, invalidRegStr, "_");
+    }
+
+    private void DisplayCompressionInstructionsInLog()
+    {
+        LogMessage($"Welcome to {AppConfig.ApplicationName}. (Compression Mode)");
         LogMessage("");
-        LogMessage("This program will compress all files in the input folder to .7z or .zip format in the output folder.");
-        LogMessage("Please follow these steps:");
-        LogMessage("1. Select the input folder containing files to compress");
-        LogMessage("2. Select the output folder where the compressed files will be saved");
-        LogMessage("3. Choose the compression format (.7z or .zip)");
-        LogMessage("4. Choose whether to delete original files after compression");
-        LogMessage("5. Click 'Start Compression' to begin the process");
+        LogMessage("This program will compress files into individual .7z or .zip archives.");
+        LogMessage("");
+        LogMessage("Please follow these steps for compression:");
+        LogMessage("1. Select the input folder containing files to compress.");
+        LogMessage("2. Select the output folder where compressed files will be saved.");
+        LogMessage("3. Choose the output format (.7z or .zip).");
+        LogMessage("4. Choose whether to delete original files after compression.");
+        LogMessage("5. Optionally, enable parallel processing for faster compression.");
+        LogMessage("6. Click 'Start Compression' to begin the process.");
         LogMessage("");
 
-        // Determine and verify the appropriate 7z executable
-        _sevenZipPath = GetAppropriateSevenZipPath();
-
-        if (File.Exists(_sevenZipPath))
+        if (_isSevenZipAvailable)
         {
-            LogMessage($"Using {Path.GetFileName(_sevenZipPath)} for {(Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit")} system.");
+            LogMessage("7z.exe found. .7z compression is available.");
         }
         else
         {
-            LogMessage($"WARNING: {Path.GetFileName(_sevenZipPath)} not found in the application directory!");
-            LogMessage("Please ensure the required 7z executables are in the same folder as this application.");
-
-            // Report this as a potential issue
-            Task.Run(async () => await ReportBugAsync($"{Path.GetFileName(_sevenZipPath)} not found in the application directory. This will prevent the application from functioning correctly."));
+            LogMessage("WARNING: 7z.exe not found in the application directory!");
+            LogMessage(".7z compression will be disabled.");
+            Format7zRadioButton.IsEnabled = false;
+            FormatZipRadioButton.IsChecked = true;
+            Task.Run(async () => await ReportBugAsync("7z.exe not found on startup. This will prevent .7z compression."));
         }
+        LogMessage("Using System.IO.Compression for .zip files.");
+        LogMessage("--- Ready for Compression ---");
     }
 
-    private void Window_Closing(object sender, CancelEventArgs e)
+    private void DisplayVerificationInstructionsInLog()
     {
-        _cts.Cancel();
-        Application.Current.Shutdown();
-        Environment.Exit(0);
+        LogMessage($"Welcome to {AppConfig.ApplicationName}. (Verification Mode)");
+        LogMessage("");
+        LogMessage("This program will verify the integrity of .7z, .zip, and .rar archives.");
+        LogMessage("");
+        LogMessage("Please follow these steps for verification:");
+        LogMessage("1. Select the folder containing archives to verify.");
+        LogMessage("2. Choose whether to include subfolders in the search.");
+        LogMessage("3. Optionally, move successfully/failed tested files to other folders.");
+        LogMessage("4. Click 'Start Verification' to begin the process.");
+        LogMessage("");
+        LogMessage("Using SevenZipExtractor library for verification.");
+        LogMessage("--- Ready for Verification ---");
     }
+
+    private void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.Source is not TabControl tabControl) return;
+        if (!StartCompressionButton.IsEnabled || !StartVerificationButton.IsEnabled) return;
+
+        Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
+        if (tabControl.SelectedItem is TabItem selectedTab)
+        {
+            switch (selectedTab.Name)
+            {
+                case "CompressTab":
+                    DisplayCompressionInstructionsInLog();
+                    break;
+                case "VerifyTab":
+                    DisplayVerificationInstructionsInLog();
+                    break;
+            }
+        }
+        UpdateWriteSpeedDisplay(0);
+    }
+
+    private void MoveSuccessFilesCheckBox_CheckedUnchecked(object sender, RoutedEventArgs e)
+    {
+        SuccessFolderPanel.Visibility = MoveSuccessFilesCheckBox.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        SetControlsState(StartCompressionButton.IsEnabled);
+    }
+
+    private void MoveFailedFilesCheckBox_CheckedUnchecked(object sender, RoutedEventArgs e)
+    {
+        FailedFolderPanel.Visibility = MoveFailedFilesCheckBox.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        SetControlsState(StartCompressionButton.IsEnabled);
+    }
+
+    private void BrowseSuccessFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        var folder = SelectFolder("Select folder for successfully verified archives");
+        if (!string.IsNullOrEmpty(folder)) SuccessFolderTextBox.Text = folder;
+    }
+
+    private void BrowseFailedFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        var folder = SelectFolder("Select folder for failed archives");
+        if (!string.IsNullOrEmpty(folder)) FailedFolderTextBox.Text = folder;
+    }
+
+    private void Window_Closing(object sender, CancelEventArgs e) => _cts.Cancel();
 
     private void LogMessage(string message)
     {
-        var timestampedMessage = $"[{DateTime.Now}] {message}";
-
-        Application.Current.Dispatcher.Invoke(() =>
+        var timestampedMessage = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
+        Application.Current.Dispatcher.InvokeAsync(() =>
         {
             LogViewer.AppendText($"{timestampedMessage}{Environment.NewLine}");
             LogViewer.ScrollToEnd();
         });
     }
 
-    private void BrowseInputButton_Click(object sender, RoutedEventArgs e)
+    private void BrowseCompressionInputButton_Click(object sender, RoutedEventArgs e)
     {
-        var inputFolder = SelectFolder("Select the folder containing files to compress");
-        if (string.IsNullOrEmpty(inputFolder)) return;
-
-        InputFolderTextBox.Text = inputFolder;
-        LogMessage($"Input folder selected: {inputFolder}");
+        var folder = SelectFolder("Select the folder containing files to compress");
+        if (string.IsNullOrEmpty(folder)) return;
+        CompressionInputFolderTextBox.Text = folder;
+        LogMessage($"Compression input folder selected: {folder}");
     }
 
-    private void BrowseOutputButton_Click(object sender, RoutedEventArgs e)
+    private void BrowseCompressionOutputButton_Click(object sender, RoutedEventArgs e)
     {
-        var outputFolder = SelectFolder("Select the output folder where compressed files will be saved");
-        if (string.IsNullOrEmpty(outputFolder)) return;
-
-        OutputFolderTextBox.Text = outputFolder;
-        LogMessage($"Output folder selected: {outputFolder}");
+        var folder = SelectFolder("Select the output folder for compressed files");
+        if (string.IsNullOrEmpty(folder)) return;
+        CompressionOutputFolderTextBox.Text = folder;
+        LogMessage($"Compression output folder selected: {folder}");
     }
 
-    private async void StartButton_Click(object sender, RoutedEventArgs e)
+    private void BrowseVerificationInputButton_Click(object sender, RoutedEventArgs e)
     {
+        var folder = SelectFolder("Select the folder containing archives to verify");
+        if (string.IsNullOrEmpty(folder)) return;
+        VerificationInputFolderTextBox.Text = folder;
+        LogMessage($"Verification input folder selected: {folder}");
+    }
+
+    private async void StartCompressionButton_Click(object sender, RoutedEventArgs e)
+    {
+        await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
+        DisplayCompressionInstructionsInLog();
+
+        var inputFolder = CompressionInputFolderTextBox.Text;
+        var outputFolder = CompressionOutputFolderTextBox.Text;
+        var deleteFiles = DeleteOriginalsCheckBox.IsChecked ?? false;
+        var useParallelFileProcessing = ParallelProcessingCheckBox.IsChecked ?? false;
+        var outputFormat = Format7zRadioButton.IsChecked == true ? ".7z" : ".zip";
+
+        if (outputFormat == ".7z" && !_isSevenZipAvailable)
+        {
+            ShowError("7z.exe is missing. Cannot create .7z archives.");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(inputFolder) || string.IsNullOrEmpty(outputFolder))
+        {
+            ShowError("Please select both input and output folders for compression.");
+            return;
+        }
+
+        if (inputFolder.Equals(outputFolder, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowError("Input and output folders must be different for compression.");
+            return;
+        }
+
+        if (_cts.IsCancellationRequested) _cts.Dispose();
+        _cts = new CancellationTokenSource();
+
+        _currentDegreeOfParallelismForFiles = useParallelFileProcessing ? 3 : 1;
+
+        ResetOperationStats();
+        SetControlsState(false);
+        _operationTimer.Restart();
+
+        LogMessage("--- Starting batch compression process... ---");
+        LogMessage($"Input folder: {inputFolder}");
+        LogMessage($"Output folder: {outputFolder}");
+        LogMessage($"Output format: {outputFormat}");
+        LogMessage($"Delete original files: {deleteFiles}");
+        LogMessage($"Parallel file processing: {useParallelFileProcessing} (Max concurrency: {_currentDegreeOfParallelismForFiles})");
+
         try
         {
-            if (!File.Exists(_sevenZipPath))
-            {
-                LogMessage($"Error: {Path.GetFileName(_sevenZipPath)} not found in the application folder.");
-                ShowError($"{Path.GetFileName(_sevenZipPath)} is missing from the application folder. Please ensure it's in the same directory as this application.");
-
-                // Report this issue
-                await ReportBugAsync($"{Path.GetFileName(_sevenZipPath)} not found when trying to start compression",
-                    new FileNotFoundException($"The required {Path.GetFileName(_sevenZipPath)} file was not found.", _sevenZipPath));
-                return;
-            }
-
-            var inputFolder = InputFolderTextBox.Text;
-            var outputFolder = OutputFolderTextBox.Text;
-            var deleteFiles = DeleteFilesCheckBox.IsChecked ?? false;
-            var use7ZFormat = SevenZipRadioButton.IsChecked ?? true;
-            var compressionFormat = use7ZFormat ? "7z" : "zip";
-
-            if (string.IsNullOrEmpty(inputFolder))
-            {
-                LogMessage("Error: No input folder selected.");
-                ShowError("Please select the input folder containing files to compress.");
-                return;
-            }
-
-            if (string.IsNullOrEmpty(outputFolder))
-            {
-                LogMessage("Error: No output folder selected.");
-                ShowError("Please select the output folder where compressed files will be saved.");
-                return;
-            }
-
-            // Reset cancellation token if it was previously used
-            if (_cts.IsCancellationRequested)
-            {
-                _cts.Dispose();
-                _cts = new CancellationTokenSource();
-            }
-
-            // Disable input controls during compression
-            SetControlsState(false);
-
-            LogMessage("Starting batch compression process...");
-            LogMessage($"Using {Path.GetFileName(_sevenZipPath)}: {_sevenZipPath}");
-            LogMessage($"Input folder: {inputFolder}");
-            LogMessage($"Output folder: {outputFolder}");
-            LogMessage($"Compression format: {compressionFormat}");
-            LogMessage($"Delete original files: {deleteFiles}");
-
-            try
-            {
-                await PerformBatchCompressionAsync(_sevenZipPath, inputFolder, outputFolder, compressionFormat, deleteFiles);
-            }
-            catch (OperationCanceledException)
-            {
-                LogMessage("Operation was canceled by user.");
-            }
-            catch (Exception ex)
-            {
-                LogMessage($"Error: {ex.Message}");
-
-                // Report the exception to our bug reporting service
-                await ReportBugAsync("Error during batch compression process", ex);
-            }
-            finally
-            {
-                // Re-enable input controls
-                SetControlsState(true);
-            }
+            await PerformBatchCompressionAsync(inputFolder, outputFolder, deleteFiles, useParallelFileProcessing, outputFormat, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage("Compression operation was canceled by user.");
         }
         catch (Exception ex)
         {
+            LogMessage($"Error during batch compression: {ex.Message}");
             await ReportBugAsync("Error during batch compression process", ex);
+        }
+        finally
+        {
+            _operationTimer.Stop();
+            UpdateProcessingTimeDisplay();
+            UpdateWriteSpeedDisplay(0);
+            SetControlsState(true);
+            LogOperationSummary("Compression");
+        }
+    }
+
+    private async void StartVerificationButton_Click(object sender, RoutedEventArgs e)
+    {
+        await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
+        DisplayVerificationInstructionsInLog();
+
+        var inputFolder = VerificationInputFolderTextBox.Text;
+        var includeSubfolders = VerificationIncludeSubfoldersCheckBox.IsChecked ?? false;
+        var moveSuccess = MoveSuccessFilesCheckBox.IsChecked == true;
+        var successFolder = SuccessFolderTextBox.Text;
+        var moveFailed = MoveFailedFilesCheckBox.IsChecked == true;
+        var failedFolder = FailedFolderTextBox.Text;
+
+        if (string.IsNullOrEmpty(inputFolder))
+        {
+            ShowError("Please select the input folder containing archives to verify.");
+            return;
+        }
+        if (moveSuccess && string.IsNullOrEmpty(successFolder))
+        {
+            ShowError("Please select a Success Folder or uncheck the option to move successful files.");
+            return;
+        }
+        if (moveFailed && string.IsNullOrEmpty(failedFolder))
+        {
+            ShowError("Please select a Failed Folder or uncheck the option to move failed files.");
+            return;
+        }
+        if (moveSuccess && moveFailed && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(failedFolder, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowError("Please select different folders for successful and failed files.");
+            return;
+        }
+        if ((moveSuccess && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)) ||
+            (moveFailed && !string.IsNullOrEmpty(failedFolder) && failedFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)))
+        {
+            ShowError("Please select Success/Failed folders that are different from the Input folder.");
+            return;
+        }
+
+        if (_cts.IsCancellationRequested) _cts.Dispose();
+        _cts = new CancellationTokenSource();
+
+        ResetOperationStats();
+        SetControlsState(false);
+        _operationTimer.Restart();
+
+        LogMessage("--- Starting batch verification process... ---");
+        LogMessage($"Input folder: {inputFolder}");
+        LogMessage($"Include subfolders: {includeSubfolders}");
+        if (moveSuccess) LogMessage($"Moving successful files to: {successFolder}");
+        if (moveFailed) LogMessage($"Moving failed files to: {failedFolder}");
+
+        try
+        {
+            await PerformBatchVerificationAsync(inputFolder, includeSubfolders, moveSuccess, successFolder, moveFailed, failedFolder, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage("Verification operation was canceled by user.");
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error during batch verification: {ex.Message}");
+            await ReportBugAsync("Error during batch verification process", ex);
+        }
+        finally
+        {
+            _operationTimer.Stop();
+            UpdateProcessingTimeDisplay();
+            UpdateWriteSpeedDisplay(0);
+            SetControlsState(true);
+            LogOperationSummary("Verification");
         }
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)
     {
         _cts.Cancel();
-        LogMessage("Cancellation requested. Waiting for current operation to complete...");
+        LogMessage("Cancellation requested. Waiting for current operation(s) to complete...");
     }
 
     private void SetControlsState(bool enabled)
     {
-        InputFolderTextBox.IsEnabled = enabled;
-        OutputFolderTextBox.IsEnabled = enabled;
-        BrowseInputButton.IsEnabled = enabled;
-        BrowseOutputButton.IsEnabled = enabled;
-        DeleteFilesCheckBox.IsEnabled = enabled;
-        StartButton.IsEnabled = enabled;
-        SevenZipRadioButton.IsEnabled = enabled;
-        ZipRadioButton.IsEnabled = enabled;
+        CompressionInputFolderTextBox.IsEnabled = enabled;
+        BrowseCompressionInputButton.IsEnabled = enabled;
+        CompressionOutputFolderTextBox.IsEnabled = enabled;
+        BrowseCompressionOutputButton.IsEnabled = enabled;
+        Format7zRadioButton.IsEnabled = enabled && _isSevenZipAvailable;
+        FormatZipRadioButton.IsEnabled = enabled;
+        DeleteOriginalsCheckBox.IsEnabled = enabled;
+        ParallelProcessingCheckBox.IsEnabled = enabled;
+        StartCompressionButton.IsEnabled = enabled;
 
-        // Show/hide progress controls
+        VerificationInputFolderTextBox.IsEnabled = enabled;
+        BrowseVerificationInputButton.IsEnabled = enabled;
+        VerificationIncludeSubfoldersCheckBox.IsEnabled = enabled;
+        StartVerificationButton.IsEnabled = enabled;
+        MoveSuccessFilesCheckBox.IsEnabled = enabled;
+        SuccessFolderTextBox.IsEnabled = enabled && (MoveSuccessFilesCheckBox.IsChecked == true);
+        BrowseSuccessFolderButton.IsEnabled = enabled && (MoveSuccessFilesCheckBox.IsChecked == true);
+        MoveFailedFilesCheckBox.IsEnabled = enabled;
+        FailedFolderTextBox.IsEnabled = enabled && (MoveFailedFilesCheckBox.IsChecked == true);
+        BrowseFailedFolderButton.IsEnabled = enabled && (MoveFailedFilesCheckBox.IsChecked == true);
+
+        SuccessFolderPanel.IsEnabled = enabled;
+        FailedFolderPanel.IsEnabled = enabled;
+        MainTabControl.IsEnabled = enabled;
+
+        ProgressText.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
         ProgressBar.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
         CancelButton.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+
+        if (!enabled) return;
+
+        ClearProgressDisplay();
+        UpdateWriteSpeedDisplay(0);
     }
 
     private static string? SelectFolder(string description)
     {
-        var dialog = new OpenFolderDialog
-        {
-            Title = description
-        };
-
+        var dialog = new OpenFolderDialog { Title = description };
         return dialog.ShowDialog() == true ? dialog.FolderName : null;
     }
 
-    private async Task PerformBatchCompressionAsync(
-        string sevenZipPath,
-        string inputFolder,
-        string outputFolder,
-        string compressionFormat,
-        bool deleteFiles)
+    private async Task PerformBatchCompressionAsync(string inputFolder, string outputFolder, bool deleteFiles, bool useParallelFileProcessing, string outputFormat, CancellationToken token)
     {
+        var filesToCompress = await Task.Run(() => Directory.GetFiles(inputFolder, "*.*", SearchOption.TopDirectoryOnly), token);
+        token.ThrowIfCancellationRequested();
+
+        _totalFilesProcessed = filesToCompress.Length;
+        UpdateStatsDisplay();
+        LogMessage($"Found {_totalFilesProcessed} files to process for compression.");
+        if (_totalFilesProcessed == 0)
+        {
+            LogMessage("No files found in the input folder for compression.");
+            return;
+        }
+
+        ProgressBar.Maximum = _totalFilesProcessed;
+        var filesActuallyProcessedCount = 0;
+
+        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = useParallelFileProcessing ? _currentDegreeOfParallelismForFiles : 1, CancellationToken = token };
+        await Parallel.ForEachAsync(filesToCompress, parallelOptions, async (currentFile, ct) =>
+        {
+            var success = await ProcessSingleFileForCompressionAsync(currentFile, outputFolder, deleteFiles, outputFormat, ct);
+            if (success) Interlocked.Increment(ref _processedOkCount);
+            else Interlocked.Increment(ref _failedCount);
+
+            var processedSoFar = Interlocked.Increment(ref filesActuallyProcessedCount);
+            UpdateProgressDisplay(processedSoFar, _totalFilesProcessed, Path.GetFileName(currentFile), "Compressing");
+            UpdateStatsDisplay();
+            UpdateProcessingTimeDisplay();
+        });
+
+        token.ThrowIfCancellationRequested();
+        UpdateWriteSpeedDisplay(0);
+    }
+
+    private async Task<bool> ProcessSingleFileForCompressionAsync(string inputFile, string outputFolder, bool deleteOriginal, string outputFormat, CancellationToken token)
+    {
+        var originalFileName = Path.GetFileName(inputFile);
+        LogMessage($"Starting to compress: {originalFileName}");
+
+        var baseName = Path.GetFileNameWithoutExtension(inputFile);
+        var outputFilePath = Path.Combine(outputFolder, SanitizeFileName(baseName) + outputFormat);
+
         try
         {
-            LogMessage("Preparing for batch compression...");
-            var files = Directory.GetFiles(inputFolder, "*.*", SearchOption.TopDirectoryOnly);
-            LogMessage($"Found {files.Length} files to compress.");
+            token.ThrowIfCancellationRequested();
 
-            if (files.Length == 0)
+            if (await Task.Run(() => File.Exists(outputFilePath), token))
             {
-                LogMessage("No files found in the input folder.");
-                return;
+                LogMessage($"Skipping {originalFileName}: Output file {Path.GetFileName(outputFilePath)} already exists.");
+                return false;
             }
 
-            ProgressBar.Maximum = files.Length;
-            ProgressBar.Value = 0;
-
-            var successCount = 0;
-            var failureCount = 0;
-
-            var skippedCount = 0;
-            for (var i = 0; i < files.Length; i++)
+            bool compressionSuccessful;
+            if (outputFormat == ".zip")
             {
-                if (_cts.Token.IsCancellationRequested)
-                {
-                    LogMessage("Operation canceled by user.");
-                    break;
-                }
-
-                var inputFile = files[i];
-                var fileName = Path.GetFileNameWithoutExtension(inputFile);
-
-                // Check if the file is already compressed
-                if (IsCompressedFile(inputFile))
-                {
-                    LogMessage($"[{i + 1}/{files.Length}] Skipping already compressed file: {Path.GetFileName(inputFile)}");
-                    skippedCount++;
-                    ProgressBar.Value = i + 1;
-                    continue;
-                }
-
-                var outputFile = Path.Combine(outputFolder, fileName + "." + compressionFormat);
-
-                if (File.Exists(outputFile))
-                {
-                    LogMessage($"Output file already exists, deleting: {outputFile}");
-                    File.Delete(outputFile);
-                }
-
-                LogMessage($"[{i + 1}/{files.Length}] Compressing: {fileName} to {compressionFormat} format");
-                var success = await CompressFileAsync(sevenZipPath, inputFile, outputFile, compressionFormat);
-
-                if (success)
-                {
-                    LogMessage($"Compression successful: {fileName}.{compressionFormat}");
-                    successCount++;
-
-                    if (deleteFiles)
-                    {
-                        try
-                        {
-                            File.Delete(inputFile);
-                            LogMessage($"Deleted original file: {fileName}");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogMessage($"Failed to delete original file: {fileName} - {ex.Message}");
-
-                            // Report the file deletion error
-                            await ReportBugAsync($"Failed to delete original file after compression: {fileName}", ex);
-                        }
-                    }
-                }
-                else
-                {
-                    LogMessage($"Compression failed: {fileName}");
-                    failureCount++;
-
-                    // Report compression failure
-                    await ReportBugAsync($"Failed to compress file: {fileName}");
-                }
-
-                ProgressBar.Value = i + 1;
+                compressionSuccessful = await CompressToZipAsync(inputFile, outputFilePath, token);
+            }
+            else
+            {
+                compressionSuccessful = await CompressTo7zAsync(inputFile, outputFilePath, token);
             }
 
-            LogMessage("");
-            LogMessage("Batch compression completed.");
-            LogMessage($"Successfully compressed: {successCount} files");
-            if (skippedCount > 0)
-            {
-                LogMessage($"Skipped (already compressed): {skippedCount} files");
-            }
+            token.ThrowIfCancellationRequested();
 
-            if (failureCount > 0)
+            if (compressionSuccessful)
             {
-                LogMessage($"Failed to compress: {failureCount} files");
+                LogMessage($"Successfully compressed {originalFileName} to {Path.GetFileName(outputFilePath)}");
+                if (deleteOriginal)
+                {
+                    await TryDeleteFileAsync(inputFile, "original file", token);
+                }
+                return true;
             }
-
-            ShowMessageBox($"Batch compression completed.\n\n" +
-                           $"Successfully compressed: {successCount} files\n" +
-                           (skippedCount > 0 ? $"Skipped (already compressed): {skippedCount} files\n" : "") +
-                           $"Failed to compress: {failureCount} files",
-                "Compression Complete", MessageBoxButton.OK,
-                failureCount > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+            else
+            {
+                LogMessage($"Failed to compress {originalFileName}.");
+                await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
+                return false;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage($"Compression cancelled for {originalFileName}.");
+            await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
+            throw;
         }
         catch (Exception ex)
         {
-            LogMessage($"Error during batch compression: {ex.Message}");
-            ShowError($"Error during batch compression: {ex.Message}");
-
-            // Report the exception
-            await ReportBugAsync("Error during batch compression operation", ex);
+            LogMessage($"Error compressing file {originalFileName}: {ex.Message}");
+            await ReportBugAsync($"Error compressing file: {originalFileName}", ex);
+            await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
+            return false;
+        }
+        finally
+        {
+            UpdateWriteSpeedDisplay(0);
         }
     }
 
-    private async Task<bool> CompressFileAsync(
-        string sevenZipPath,
-        string inputFile,
-        string outputFile,
-        string compressionFormat)
+    private async Task PerformBatchVerificationAsync(string inputFolder, bool includeSubfolders, bool moveSuccess, string successFolder, bool moveFailed, string failedFolder, CancellationToken token)
     {
+        var searchOption = includeSubfolders ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+        var filesToVerify = await Task.Run(() =>
+            Directory.GetFiles(inputFolder, "*.*", searchOption)
+                .Where(file => AllSupportedVerificationExtensions.Contains(Path.GetExtension(file).ToLowerInvariant()))
+                .ToArray(), token);
+        token.ThrowIfCancellationRequested();
+
+        _totalFilesProcessed = filesToVerify.Length;
+        UpdateStatsDisplay();
+        LogMessage($"Found {_totalFilesProcessed} archives to verify.");
+        if (_totalFilesProcessed == 0)
+        {
+            LogMessage("No supported archives found in the specified folder for verification.");
+            return;
+        }
+
+        ProgressBar.Maximum = _totalFilesProcessed;
+        var filesActuallyProcessedCount = 0;
+
+        foreach (var archiveFile in filesToVerify)
+        {
+            token.ThrowIfCancellationRequested();
+            var fileName = Path.GetFileName(archiveFile);
+            UpdateProgressDisplay(filesActuallyProcessedCount + 1, _totalFilesProcessed, fileName, "Verifying");
+
+            var isValid = await VerifyArchiveAsync(archiveFile, token);
+            token.ThrowIfCancellationRequested();
+
+            if (isValid)
+            {
+                LogMessage($"✓ Verification successful: {fileName}");
+                _processedOkCount++;
+                if (moveSuccess && !string.IsNullOrEmpty(successFolder))
+                {
+                    await MoveVerifiedFileAsync(archiveFile, successFolder, inputFolder, includeSubfolders, "successfully verified", token);
+                }
+            }
+            else
+            {
+                LogMessage($"✗ Verification failed: {fileName}");
+                _failedCount++;
+                if (moveFailed && !string.IsNullOrEmpty(failedFolder))
+                {
+                    await MoveVerifiedFileAsync(archiveFile, failedFolder, inputFolder, includeSubfolders, "failed verification", token);
+                }
+            }
+
+            token.ThrowIfCancellationRequested();
+            filesActuallyProcessedCount++;
+            UpdateStatsDisplay();
+            UpdateProcessingTimeDisplay();
+        }
+    }
+
+    private async Task MoveVerifiedFileAsync(string sourceFile, string destinationParentFolder, string baseInputFolder, bool maintainSubfolders, string moveReason, CancellationToken token)
+    {
+        var fileName = Path.GetFileName(sourceFile);
+        string destinationFile;
+
         try
         {
-            // Build the arguments for 7z.exe - same command 'a' (add) works for both formats
-            // The archive type is determined by the extension of the output file
-            var arguments = $"a \"{outputFile}\" \"{inputFile}\"";
-
-            var process = new Process
+            token.ThrowIfCancellationRequested();
+            string targetDir;
+            if (maintainSubfolders && !string.IsNullOrEmpty(Path.GetDirectoryName(sourceFile)) && Path.GetDirectoryName(sourceFile) != baseInputFolder)
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = sevenZipPath,
-                    Arguments = arguments,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
+                var relativeDir = Path.GetRelativePath(baseInputFolder, Path.GetDirectoryName(sourceFile) ?? string.Empty);
+                targetDir = Path.Combine(destinationParentFolder, relativeDir);
+            }
+            else
+            {
+                targetDir = destinationParentFolder;
+            }
+            destinationFile = Path.Combine(targetDir, fileName);
 
-            process.Start();
+            if (!await Task.Run(() => Directory.Exists(targetDir), token))
+            {
+                await Task.Run(() => Directory.CreateDirectory(targetDir), token);
+            }
 
-            // Read output to prevent the process from blocking
-            await process.StandardOutput.ReadToEndAsync();
-            await process.StandardError.ReadToEndAsync();
+            token.ThrowIfCancellationRequested();
+            if (await Task.Run(() => File.Exists(destinationFile), token))
+            {
+                LogMessage($"Cannot move {fileName}: Destination file already exists at {destinationFile}. Skipping move.");
+                return;
+            }
 
-            await Task.Run(() => process.WaitForExit(), _cts.Token);
-
-            return process.ExitCode == 0;
+            token.ThrowIfCancellationRequested();
+            await Task.Run(() => File.Move(sourceFile, destinationFile), token);
+            LogMessage($"Moved {fileName} ({moveReason}) to {destinationFile}");
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage($"Move operation for {fileName} cancelled.");
+            throw;
         }
         catch (Exception ex)
         {
-            LogMessage($"Error compressing file: {ex.Message}");
+            LogMessage($"Error moving {fileName} to {destinationParentFolder}: {ex.Message}");
+            await ReportBugAsync($"Error moving verified file {fileName}", ex);
+        }
+    }
 
-            // Report this specific file compression error
-            await ReportBugAsync($"Error compressing file: {Path.GetFileName(inputFile)}", ex);
+    private async Task<bool> CompressToZipAsync(string inputFile, string outputZipFile, CancellationToken token)
+    {
+        try
+        {
+            await Task.Run(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                using var archive = ZipFile.Open(outputZipFile, ZipArchiveMode.Create);
+                token.ThrowIfCancellationRequested();
+                archive.CreateEntryFromFile(inputFile, Path.GetFileName(inputFile), CompressionLevel.Optimal);
+            }, token);
+            return await Task.Run(() => File.Exists(outputZipFile), token);
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error creating zip file {Path.GetFileName(outputZipFile)}: {ex.Message}");
             return false;
         }
     }
 
+    private async Task<bool> CompressTo7zAsync(string inputFile, string output7zFile, CancellationToken token)
+    {
+        using var process = new Process();
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            var arguments = $"a -t7z \"{output7zFile}\" \"{inputFile}\" -y";
+
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = _sevenZipPath,
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            process.EnableRaisingEvents = true;
+
+            process.OutputDataReceived += (_, args) => { if (!string.IsNullOrEmpty(args.Data)) LogMessage($"[7-ZIP STDOUT] {args.Data}"); };
+            process.ErrorDataReceived += (_, args) => { if (!string.IsNullOrEmpty(args.Data)) LogMessage($"[7-ZIP STDERR] {args.Data}"); };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            var lastSpeedCheckTime = DateTime.UtcNow;
+            long lastFileSize = 0;
+
+            while (!process.HasExited)
+            {
+                if (token.IsCancellationRequested)
+                {
+                    try { if (!process.HasExited) process.Kill(true); } catch { /* ignore */ }
+                    token.ThrowIfCancellationRequested();
+                }
+
+                await Task.Delay(WriteSpeedUpdateIntervalMs, token);
+                if (process.HasExited || token.IsCancellationRequested) break;
+
+                try
+                {
+                    if (await Task.Run(() => File.Exists(output7zFile), token))
+                    {
+                        var currentFileSize = await Task.Run(() => new FileInfo(output7zFile).Length, token);
+                        var currentTime = DateTime.UtcNow;
+                        var timeDelta = currentTime - lastSpeedCheckTime;
+
+                        if (timeDelta.TotalSeconds > 0)
+                        {
+                            var bytesDelta = currentFileSize - lastFileSize;
+                            var speed = (bytesDelta / timeDelta.TotalSeconds) / (1024.0 * 1024.0);
+                            UpdateWriteSpeedDisplay(speed);
+                        }
+
+                        lastFileSize = currentFileSize;
+                        lastSpeedCheckTime = currentTime;
+                    }
+                }
+                catch (FileNotFoundException) { /* File might not be created yet */ }
+                catch (Exception ex) { LogMessage($"Write speed monitoring error: {ex.Message}"); }
+            }
+
+            await process.WaitForExitAsync(token);
+            return process.ExitCode == 0;
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage("7z compression operation was canceled by user.");
+            try { if (!process.HasExited) process.Kill(true); } catch { /* ignore */ }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error running 7z.exe for {Path.GetFileName(inputFile)}: {ex.Message}");
+            await ReportBugAsync($"Error running 7z.exe for {Path.GetFileName(inputFile)}", ex);
+            return false;
+        }
+    }
+
+    private async Task<bool> VerifyArchiveAsync(string archivePath, CancellationToken token)
+    {
+        try
+        {
+            return await Task.Run(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                using var archiveFile = new ArchiveFile(archivePath);
+                return archiveFile.Check();
+            }, token);
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage($"Verification cancelled for {Path.GetFileName(archivePath)}.");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error verifying archive {Path.GetFileName(archivePath)}: {ex.Message}");
+            await ReportBugAsync($"Error verifying archive: {Path.GetFileName(archivePath)}", ex);
+            return false;
+        }
+    }
+
+    private void ResetOperationStats()
+    {
+        _totalFilesProcessed = 0;
+        _processedOkCount = 0;
+        _failedCount = 0;
+        _operationTimer.Reset();
+        UpdateStatsDisplay();
+        UpdateProcessingTimeDisplay();
+        UpdateWriteSpeedDisplay(0);
+        ClearProgressDisplay();
+    }
+
+    private void UpdateStatsDisplay()
+    {
+        Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            TotalFilesValue.Text = _totalFilesProcessed.ToString(CultureInfo.InvariantCulture);
+            SuccessValue.Text = _processedOkCount.ToString(CultureInfo.InvariantCulture);
+            FailedValue.Text = _failedCount.ToString(CultureInfo.InvariantCulture);
+        });
+    }
+
+    private void UpdateProcessingTimeDisplay()
+    {
+        var elapsed = _operationTimer.Elapsed;
+        Application.Current.Dispatcher.InvokeAsync(() => { ProcessingTimeValue.Text = $@"{elapsed:hh\:mm\:ss}"; });
+    }
+
+    private void UpdateWriteSpeedDisplay(double speedInMBps)
+    {
+        Application.Current.Dispatcher.InvokeAsync(() => { WriteSpeedValue.Text = $"{speedInMBps:F1} MB/s"; });
+    }
+
+    private void UpdateProgressDisplay(int current, int total, string currentFileName, string operationVerb)
+    {
+        var percentage = total == 0 ? 0 : (double)current / total * 100;
+        Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            ProgressText.Text = $"{operationVerb} file {current} of {total}: {currentFileName} ({percentage:F1}%)";
+            ProgressBar.Value = current;
+            ProgressBar.Maximum = total > 0 ? total : 1;
+            ProgressText.Visibility = Visibility.Visible;
+            ProgressBar.Visibility = Visibility.Visible;
+        });
+    }
+
+    private void ClearProgressDisplay()
+    {
+        Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            ProgressBar.Value = 0;
+            ProgressBar.Visibility = Visibility.Collapsed;
+            ProgressText.Text = string.Empty;
+            ProgressText.Visibility = Visibility.Collapsed;
+        });
+    }
+
+    private async Task TryDeleteFileAsync(string filePath, string description, CancellationToken token)
+    {
+        try
+        {
+            if (token != CancellationToken.None) token.ThrowIfCancellationRequested();
+            if (!await Task.Run(() => File.Exists(filePath), token == CancellationToken.None ? new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token : token)) return;
+            if (token != CancellationToken.None) token.ThrowIfCancellationRequested();
+            await Task.Run(() => File.Delete(filePath), token == CancellationToken.None ? new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token : token);
+            LogMessage($"Deleted {description}: {Path.GetFileName(filePath)}");
+        }
+        catch (OperationCanceledException) when (token != CancellationToken.None)
+        {
+            LogMessage("Process was canceled by user.");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Failed to delete {description} {Path.GetFileName(filePath)}: {ex.Message}");
+        }
+    }
+
+    private void LogOperationSummary(string operationType)
+    {
+        LogMessage("");
+        LogMessage($"--- Batch {operationType.ToLowerInvariant()} completed. ---");
+        LogMessage($"Total files processed: {_totalFilesProcessed}");
+        LogMessage($"Successfully {GetPastTense(operationType)}: {_processedOkCount} files");
+        if (_failedCount > 0) LogMessage($"Failed to {operationType.ToLowerInvariant()}: {_failedCount} files");
+
+        Application.Current.Dispatcher.InvokeAsync(() =>
+            ShowMessageBox($"Batch {operationType.ToLowerInvariant()} completed.\n\n" +
+                           $"Total files processed: {_totalFilesProcessed}\n" +
+                           $"Successfully {GetPastTense(operationType)}: {_processedOkCount} files\n" +
+                           $"Failed: {_failedCount} files",
+                $"{operationType} Complete", MessageBoxButton.OK,
+                _failedCount > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information));
+    }
+
+    private string GetPastTense(string verb)
+    {
+        return verb.ToLowerInvariant() switch
+        {
+            "compression" => "compressed",
+            "verification" => "verified",
+            _ => verb.ToLowerInvariant() + "ed"
+        };
+    }
+
     private void ShowMessageBox(string message, string title, MessageBoxButton buttons, MessageBoxImage icon)
     {
-        Dispatcher.Invoke(() =>
-            MessageBox.Show(message, title, buttons, icon));
+        MessageBox.Show(this, message, title, buttons, icon);
     }
 
     private void ShowError(string message)
     {
-        ShowMessageBox(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        Application.Current.Dispatcher.InvokeAsync(() => ShowMessageBox(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error));
     }
 
-    /// <summary>
-    /// Silently reports bugs/errors to the API
-    /// </summary>
     private async Task ReportBugAsync(string message, Exception? exception = null)
     {
         try
         {
             var fullReport = new StringBuilder();
-
-            // Add system information
             fullReport.AppendLine("=== Bug Report ===");
-            fullReport.AppendLine($"Application: {ApplicationName}");
+            fullReport.AppendLine($"Application: {AppConfig.ApplicationName}");
             fullReport.AppendLine(CultureInfo.InvariantCulture, $"Version: {GetType().Assembly.GetName().Version}");
             fullReport.AppendLine(CultureInfo.InvariantCulture, $"OS: {Environment.OSVersion}");
             fullReport.AppendLine(CultureInfo.InvariantCulture, $".NET Version: {Environment.Version}");
             fullReport.AppendLine(CultureInfo.InvariantCulture, $"Date/Time: {DateTime.Now}");
-            fullReport.AppendLine();
-
-            // Add a message
-            fullReport.AppendLine("=== Error Message ===");
-            fullReport.AppendLine(message);
-            fullReport.AppendLine();
-
-            // Add exception details if available
+            fullReport.AppendLine().AppendLine("=== Error Message ===").AppendLine(message).AppendLine();
             if (exception != null)
             {
                 fullReport.AppendLine("=== Exception Details ===");
-                fullReport.AppendLine(CultureInfo.InvariantCulture, $"Type: {exception.GetType().FullName}");
-                fullReport.AppendLine(CultureInfo.InvariantCulture, $"Message: {exception.Message}");
-                fullReport.AppendLine(CultureInfo.InvariantCulture, $"Source: {exception.Source}");
-                fullReport.AppendLine("Stack Trace:");
-                fullReport.AppendLine(exception.StackTrace);
-
-                // Add inner exception if available
-                if (exception.InnerException != null)
-                {
-                    fullReport.AppendLine("Inner Exception:");
-                    fullReport.AppendLine(CultureInfo.InvariantCulture, $"Type: {exception.InnerException.GetType().FullName}");
-                    fullReport.AppendLine(CultureInfo.InvariantCulture, $"Message: {exception.InnerException.Message}");
-                    fullReport.AppendLine("Stack Trace:");
-                    fullReport.AppendLine(exception.InnerException.StackTrace);
-                }
+                App.AppendExceptionDetails(fullReport, exception);
             }
 
-            // Add log contents if available
             if (LogViewer != null)
             {
-                var logContent = string.Empty;
-
-                // Safely get log content from UI thread
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    logContent = LogViewer.Text;
-                });
-
-                if (!string.IsNullOrEmpty(logContent))
-                {
-                    fullReport.AppendLine();
-                    fullReport.AppendLine("=== Application Log ===");
-                    fullReport.Append(logContent);
-                }
+                var logContent = await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Text);
+                if (!string.IsNullOrEmpty(logContent)) fullReport.AppendLine().AppendLine("=== Application Log ===").Append(logContent);
             }
 
-            // Silently send the report
-            await _bugReportService.SendBugReportAsync(fullReport.ToString());
+            if (App.SharedBugReportService != null)
+            {
+                await App.SharedBugReportService.SendBugReportAsync(fullReport.ToString());
+            }
         }
-        catch
-        {
-            // Silently fail if error reporting itself fails
-        }
+        catch { /* Silently fail reporting */ }
     }
 
-    /// <summary>
-    /// Determines the appropriate 7z executable path based on the system architecture
-    /// </summary>
-    /// <returns>The path to the appropriate 7z executable</returns>
-    private string GetAppropriateSevenZipPath()
-    {
-        var appDirectory = AppDomain.CurrentDomain.BaseDirectory;
+    private void ExitMenuItem_Click(object sender, RoutedEventArgs e) => Close();
 
-        // Check if we're running on a 64-bit operating system
-        if (Environment.Is64BitOperatingSystem)
-        {
-            return Path.Combine(appDirectory, "7z.exe");
-        }
-        else
-        {
-            return Path.Combine(appDirectory, "7z_x86.exe");
-        }
-    }
-
-    /// <summary>
-    /// Checks if a file has a compression file extension
-    /// </summary>
-    /// <param name="filePath">Path to the file to check</param>
-    /// <returns>True if the file has a compression extension (.rar, .zip, or .7z), otherwise false</returns>
-    private static bool IsCompressedFile(string filePath)
+    private void AboutMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        var extension = Path.GetExtension(filePath)?.ToLowerInvariant();
-        return extension is ".rar" or ".zip" or ".7z";
+        try
+        {
+            new AboutWindow { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error opening About window: {ex.Message}");
+            _ = ReportBugAsync("Error opening About window", ex);
+        }
     }
 
     public void Dispose()
     {
-        // Dispose of the cancellation token source
+        _cts?.Cancel();
         _cts?.Dispose();
-        // _cts = null;
-
-        // Dispose of the bug report service if it implements IDisposable
-        if (_bugReportService is IDisposable bugReportService)
-        {
-            bugReportService.Dispose();
-        }
-
-        // Suppress finalization for better performance
+        _operationTimer?.Stop();
         GC.SuppressFinalize(this);
     }
 }

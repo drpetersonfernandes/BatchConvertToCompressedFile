@@ -4,25 +4,17 @@ using System.Windows.Threading;
 
 namespace BatchConvertToCompressedFile;
 
-/// <inheritdoc cref="System.Windows.Application" />
-/// <summary>
-/// Interaction logic for App.xaml
-/// </summary>
 public partial class App : IDisposable
 {
-    // Bug Report API configuration
-    private const string BugReportApiUrl = "https://www.purelogiccode.com/bugreport/api/send-bug-report";
-    private const string BugReportApiKey = "hjh7yu6t56tyr540o9u8767676r5674534453235264c75b6t7ggghgg76trf564e";
-    private const string ApplicationName = "BatchConvertToCompressedFile";
-
     private readonly BugReportService? _bugReportService;
+    
+    public static BugReportService? SharedBugReportService { get; private set; }
 
     public App()
     {
-        // Initialize the bug report service
-        _bugReportService = new BugReportService(BugReportApiUrl, BugReportApiKey, ApplicationName);
-
-        // Set up global exception handling
+        SharedBugReportService = new BugReportService(AppConfig.BugReportApiUrl, AppConfig.BugReportApiKey, AppConfig.ApplicationName);
+        _bugReportService = SharedBugReportService;
+        
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
         DispatcherUnhandledException += App_DispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
@@ -42,6 +34,8 @@ public partial class App : IDisposable
         e.Handled = true;
     }
 
+
+
     private void TaskScheduler_UnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
     {
         ReportException(e.Exception, "TaskScheduler.UnobservedTaskException");
@@ -53,8 +47,6 @@ public partial class App : IDisposable
         try
         {
             var message = BuildExceptionReport(exception, source);
-
-            // Silently report the exception to our API
             if (_bugReportService != null)
             {
                 await _bugReportService.SendBugReportAsync(message);
@@ -62,11 +54,11 @@ public partial class App : IDisposable
         }
         catch
         {
-            // Silently ignore any errors in the reporting process
+            // Silently ignore
         }
     }
 
-    private string BuildExceptionReport(Exception exception, string source)
+    internal static string BuildExceptionReport(Exception exception, string source)
     {
         var sb = new StringBuilder();
         sb.AppendLine(CultureInfo.InvariantCulture, $"Error Source: {source}");
@@ -74,50 +66,39 @@ public partial class App : IDisposable
         sb.AppendLine(CultureInfo.InvariantCulture, $"OS Version: {Environment.OSVersion}");
         sb.AppendLine(CultureInfo.InvariantCulture, $".NET Version: {Environment.Version}");
         sb.AppendLine();
-
-        // Add exception details
         sb.AppendLine("Exception Details:");
         AppendExceptionDetails(sb, exception);
-
         return sb.ToString();
     }
 
-    private static void AppendExceptionDetails(StringBuilder sb, Exception exception, int level = 0)
+    internal static void AppendExceptionDetails(StringBuilder sb, Exception exception, int level = 0)
     {
         while (true)
         {
             var indent = new string(' ', level * 2);
-
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Type: {exception.GetType().FullName}");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Message: {exception.Message}");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Source: {exception.Source}");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}StackTrace:");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{exception.StackTrace}");
 
-            // If there's an inner exception, include it too
-            if (exception.InnerException != null)
-            {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Inner Exception:");
-                exception = exception.InnerException;
-                level = level + 1;
-                continue;
-            }
-
-            break;
+            if (exception.InnerException == null) break;
+            
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}Inner Exception:");
+            exception = exception.InnerException;
+            level += 1;
         }
     }
 
     public void Dispose()
     {
-        // Dispose the bug report service if it exists
         _bugReportService?.Dispose();
-
-        // Unregister event handlers to prevent memory leaks
+        SharedBugReportService = null;
+        
         AppDomain.CurrentDomain.UnhandledException -= CurrentDomain_UnhandledException;
         DispatcherUnhandledException -= App_DispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException -= TaskScheduler_UnobservedTaskException;
-
-        // Suppress finalization since we've cleaned up resources
+        
         GC.SuppressFinalize(this);
     }
 }

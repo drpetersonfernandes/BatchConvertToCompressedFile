@@ -20,16 +20,4 @@
     <Resource Include="icon\icon.png" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Update="7z.dll">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Update="7z.exe">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Update="7z_x86.exe">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
 </Project>
