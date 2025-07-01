@@ -134,8 +134,7 @@ public partial class MainWindow : IDisposable
         LogMessage("2. Select the output folder where compressed files will be saved.");
         LogMessage("3. Choose the output format (.7z or .zip).");
         LogMessage("4. Choose whether to delete original files after compression.");
-        LogMessage("5. Optionally, enable parallel processing for faster compression.");
-        LogMessage("6. Click 'Start Compression' to begin the process.");
+        LogMessage("5. Click 'Start Compression' to begin the process.");
         LogMessage("");
         if (_isSevenZipDllAvailable)
         {
@@ -273,7 +272,8 @@ public partial class MainWindow : IDisposable
 
     private void Window_Closing(object sender, CancelEventArgs e)
     {
-        _cts.Cancel();
+        _cts?.Cancel();
+        _cts?.Dispose();
         StopWriteSpeedTracking();
     }
 
@@ -626,21 +626,21 @@ public partial class MainWindow : IDisposable
             else
             {
                 LogMessage($"Failed to compress {originalFileName}.");
-                await TryDeleteFileAsync(outputFilePath, "partially created archive", token);
+                await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
                 return false;
             }
         }
         catch (OperationCanceledException)
         {
             LogMessage($"Compression cancelled for {originalFileName}.");
-            await TryDeleteFileAsync(outputFilePath, "partially created archive", token);
+            await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
             throw;
         }
         catch (Exception ex)
         {
             LogMessage($"Error compressing file {originalFileName}: {ex.Message}");
             _ = ReportBugAsync($"Error compressing file: {originalFileName}", ex);
-            await TryDeleteFileAsync(outputFilePath, "partially created archive", token);
+            await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
             return false;
         }
     }

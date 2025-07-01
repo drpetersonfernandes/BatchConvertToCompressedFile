@@ -6,15 +6,13 @@ A Windows desktop utility for batch compressing files to `.7z` or `.zip` formats
 
 ## Overview
 
-Batch Convert to Compressed File is a Windows application that provides a simple user interface for compressing multiple files into individual archives and verifying the integrity of existing compressed files. It uses **7-Zip** for `.7z` compression and built-in .NET libraries for `.zip` compression, while providing a user-friendly interface for batch processing. It also supports parallel processing for improved performance and comprehensive archive verification.
+Batch Convert to Compressed File is a Windows application that provides a simple user interface for compressing multiple files into individual archives and verifying the integrity of existing compressed files. It uses **7-Zip** for `.7z` compression and built-in .NET libraries for `.zip` compression, while providing a user-friendly interface for batch processing.
 
 ## Features
 
 - **Batch Compression**: Compress multiple files into individual archives in a single operation.
 - **Multiple Format Support**: Create `.7z` archives using 7-Zip or `.zip` archives using built-in .NET compression.
 - **Archive Verification**: Verify the integrity of `.7z`, `.zip`, and `.rar` archives with comprehensive CRC checking.
-- **7-Zip Integration**: Uses `7z.exe` for `.7z` compression, included with the application.
-- **Parallel Processing**: Optionally process multiple files in parallel to speed up batch operations.
 - **Progress Tracking**: Detailed progress indication, real-time logging, and write speed monitoring during operations.
 - **Delete Original Option**: Option to remove source files after successful compression.
 - **File Organization**: Automatically move verified archives to success or failed folders.
@@ -53,10 +51,9 @@ Batch Convert to Compressed File is a Windows application that provides a simple
 3. **Select Output Folder**: Click "Browse" next to "Output Folder" to choose where the compressed files will be saved.
 4. **Choose Output Format**: Select either ".7z" or ".zip" format for the compressed archives.
 5. **Delete Option**: Check "Delete original files after successful compression" if you want to remove source files after compression.
-6. **Parallel Processing Option**: Check "Enable parallel processing" to compress multiple files concurrently for faster batch completion.
-7. **Start Compression**: Click "Start Compression" to begin the batch process.
-8. **Monitor Progress**: The application displays progress bars, write speed, and detailed log messages for each file during compression.
-9. **Cancel (if needed)**: Click "Cancel" to stop the ongoing compression process gracefully.
+6. **Start Compression**: Click "Start Compression" to begin the batch process.
+7. **Monitor Progress**: The application displays progress bars, write speed, and detailed log messages for each file during compression.
+8. **Cancel (if needed)**: Click "Cancel" to stop the ongoing compression process gracefully.
 
 ### Verifying Archives
 
@@ -90,7 +87,6 @@ The ZIP format is a widely supported archive format that provides:
 - **Save Disk Space**: Compressed files take up significantly less storage space.
 - **Verify Integrity**: Ensure your archives are not corrupted and can be safely extracted.
 - **Organize Files**: Automatically organize verified archives into success and failed folders.
-- **Performance**: Parallel processing capabilities for faster batch operations.
 - **Reliability**: Built-in error handling and comprehensive logging for troubleshooting.
 
 ## Troubleshooting

@@ -34,7 +34,14 @@ public partial class AboutWindow
         {
             if (App.SharedBugReportService != null)
             {
-                _ = App.SharedBugReportService.SendBugReportAsync($"Error opening URL: {e.Uri.AbsoluteUri}. Exception: {ex.Message}");
+                try
+                {
+                    _ = App.SharedBugReportService.SendBugReportAsync($"Error opening URL: {e.Uri.AbsoluteUri}. Exception: {ex.Message}");
+                }
+                catch (Exception)
+                {
+                    // ignore
+                }
             }
 
             MessageBox.Show($"Unable to open link: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
