@@ -2,13 +2,12 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
-using SevenZipExtractor;
+using SevenZip;
 
 namespace BatchConvertToCompressedFile;
 
@@ -16,8 +15,7 @@ public partial class MainWindow : IDisposable
 {
     private CancellationTokenSource _cts;
 
-    private readonly string _sevenZipPath;
-    private readonly bool _isSevenZipAvailable;
+    private readonly bool _isSevenZipDllAvailable;
 
     private static readonly string[] AllSupportedVerificationExtensions = { ".zip", ".7z", ".rar" };
 
@@ -38,8 +36,29 @@ public partial class MainWindow : IDisposable
         _cts = new CancellationTokenSource();
 
         var appDirectory = AppDomain.CurrentDomain.BaseDirectory;
-        _sevenZipPath = Path.Combine(appDirectory, "7z.exe");
-        _isSevenZipAvailable = File.Exists(_sevenZipPath);
+        var sevenZipDllPath = Path.Combine(appDirectory, "7z.dll");
+        _isSevenZipDllAvailable = File.Exists(sevenZipDllPath);
+
+        if (_isSevenZipDllAvailable)
+        {
+            try
+            {
+                SevenZipBase.SetLibraryPath(sevenZipDllPath);
+            }
+            catch (Exception ex)
+            {
+                _isSevenZipDllAvailable = false;
+                LogMessage($"FATAL: Failed to load 7z.dll. Compression and verification will be disabled. Error: {ex.Message}");
+                Task.Run(() => Task.FromResult(_ = ReportBugAsync($"Failed to load 7z.dll: {ex.Message}", ex)));
+            }
+        }
+
+        if (!_isSevenZipDllAvailable)
+        {
+            CompressTab.IsEnabled = false;
+            VerifyTab.IsEnabled = false;
+            LogMessage("CRITICAL: 7z.dll is required for all operations. Application functionality is severely limited.");
+        }
 
         DisplayCompressionInstructionsInLog();
         ResetOperationStats();
@@ -67,21 +86,51 @@ public partial class MainWindow : IDisposable
         LogMessage("6. Click 'Start Compression' to begin the process.");
         LogMessage("");
 
-        if (_isSevenZipAvailable)
+        if (_isSevenZipDllAvailable)
         {
-            LogMessage("7z.exe found. .7z compression is available.");
+            LogMessage("7z.dll found. Compression (.7z and .zip) and verification are available.");
         }
         else
         {
-            LogMessage("WARNING: 7z.exe not found in the application directory!");
-            LogMessage(".7z compression will be disabled.");
+            LogMessage("CRITICAL: 7z.dll not found in the application directory!");
+            LogMessage("All compression and verification features are disabled.");
             Format7ZRadioButton.IsEnabled = false;
-            FormatZipRadioButton.IsChecked = true;
-            Task.Run(() => Task.FromResult(_ = ReportBugAsync("7z.exe not found on startup. This will prevent .7z compression.")));
+            FormatZipRadioButton.IsChecked = false;
         }
 
-        LogMessage("Using System.IO.Compression for .zip files.");
         LogMessage("--- Ready for Compression ---");
+    }
+
+    private async Task<bool> CompressWithLibraryAsync(string inputFile, string outputFile, string format, CancellationToken token)
+    {
+        try
+        {
+            var compressor = new SevenZipCompressor();
+
+            // Configure compression settings
+            compressor.CompressionMode = CompressionMode.Create;
+            compressor.ArchiveFormat = format == ".7z" ? OutArchiveFormat.SevenZip : OutArchiveFormat.Zip;
+            compressor.CompressionMethod = CompressionMethod.Lzma2;
+            compressor.CompressionLevel = CompressionLevel.Ultra;
+            compressor.FastCompression = false;
+
+            await Task.Run(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                compressor.CompressFiles(outputFile, inputFile);
+            }, token);
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Error creating {format} file: {ex.Message}");
+            return false;
+        }
     }
 
     private void DisplayVerificationInstructionsInLog()
@@ -96,7 +145,17 @@ public partial class MainWindow : IDisposable
         LogMessage("3. Optionally, move successfully/failed tested files to other folders.");
         LogMessage("4. Click 'Start Verification' to begin the process.");
         LogMessage("");
-        LogMessage("Using SevenZipExtractor library for verification.");
+
+        if (_isSevenZipDllAvailable)
+        {
+            LogMessage("Using 7-Zip library (7z.dll) for verification.");
+        }
+        else
+        {
+            LogMessage("WARNING: 7z.dll not found in the application directory! Verification is disabled.");
+            Task.Run(() => Task.FromResult(_ = ReportBugAsync("7z.dll not found on startup. This will prevent archive verification.")));
+        }
+
         LogMessage("--- Ready for Verification ---");
     }
 
@@ -207,12 +266,6 @@ public partial class MainWindow : IDisposable
             var useParallelFileProcessing = ParallelProcessingCheckBox.IsChecked ?? false;
             var outputFormat = Format7ZRadioButton.IsChecked == true ? ".7z" : ".zip";
 
-            if (outputFormat == ".7z" && !_isSevenZipAvailable)
-            {
-                ShowError("7z.exe is missing. Cannot create .7z archives.");
-                return;
-            }
-
             if (string.IsNullOrEmpty(inputFolder) || string.IsNullOrEmpty(outputFolder))
             {
                 ShowError("Please select both input and output folders for compression.");
@@ -273,80 +326,93 @@ public partial class MainWindow : IDisposable
     {
         try
         {
-            await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
-            DisplayVerificationInstructionsInLog();
-
-            var inputFolder = VerificationInputFolderTextBox.Text;
-            var includeSubfolders = VerificationIncludeSubfoldersCheckBox.IsChecked ?? false;
-            var moveSuccess = MoveSuccessFilesCheckBox.IsChecked == true;
-            var successFolder = SuccessFolderTextBox.Text;
-            var moveFailed = MoveFailedFilesCheckBox.IsChecked == true;
-            var failedFolder = FailedFolderTextBox.Text;
-
-            if (string.IsNullOrEmpty(inputFolder))
+            if (!_isSevenZipDllAvailable)
             {
-                ShowError("Please select the input folder containing archives to verify.");
+                ShowError("7z.dll is missing or could not be loaded. Cannot perform verification.");
                 return;
             }
-
-            if (moveSuccess && string.IsNullOrEmpty(successFolder))
-            {
-                ShowError("Please select a Success Folder or uncheck the option to move successful files.");
-                return;
-            }
-
-            if (moveFailed && string.IsNullOrEmpty(failedFolder))
-            {
-                ShowError("Please select a Failed Folder or uncheck the option to move failed files.");
-                return;
-            }
-
-            if (moveSuccess && moveFailed && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(failedFolder, StringComparison.OrdinalIgnoreCase))
-            {
-                ShowError("Please select different folders for successful and failed files.");
-                return;
-            }
-
-            if ((moveSuccess && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)) ||
-                (moveFailed && !string.IsNullOrEmpty(failedFolder) && failedFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)))
-            {
-                ShowError("Please select Success/Failed folders that are different from the Input folder.");
-                return;
-            }
-
-            if (_cts.IsCancellationRequested) _cts.Dispose();
-            _cts = new CancellationTokenSource();
-
-            ResetOperationStats();
-            SetControlsState(false);
-            _operationTimer.Restart();
-
-            LogMessage("--- Starting batch verification process... ---");
-            LogMessage($"Input folder: {inputFolder}");
-            LogMessage($"Include subfolders: {includeSubfolders}");
-            if (moveSuccess) LogMessage($"Moving successful files to: {successFolder}");
-            if (moveFailed) LogMessage($"Moving failed files to: {failedFolder}");
 
             try
             {
-                await PerformBatchVerificationAsync(inputFolder, includeSubfolders, moveSuccess, successFolder, moveFailed, failedFolder, _cts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                LogMessage("Verification operation was canceled by user.");
+                await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
+                DisplayVerificationInstructionsInLog();
+
+                var inputFolder = VerificationInputFolderTextBox.Text;
+                var includeSubfolders = VerificationIncludeSubfoldersCheckBox.IsChecked ?? false;
+                var moveSuccess = MoveSuccessFilesCheckBox.IsChecked == true;
+                var successFolder = SuccessFolderTextBox.Text;
+                var moveFailed = MoveFailedFilesCheckBox.IsChecked == true;
+                var failedFolder = FailedFolderTextBox.Text;
+
+                if (string.IsNullOrEmpty(inputFolder))
+                {
+                    ShowError("Please select the input folder containing archives to verify.");
+                    return;
+                }
+
+                if (moveSuccess && string.IsNullOrEmpty(successFolder))
+                {
+                    ShowError("Please select a Success Folder or uncheck the option to move successful files.");
+                    return;
+                }
+
+                if (moveFailed && string.IsNullOrEmpty(failedFolder))
+                {
+                    ShowError("Please select a Failed Folder or uncheck the option to move failed files.");
+                    return;
+                }
+
+                if (moveSuccess && moveFailed && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(failedFolder, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShowError("Please select different folders for successful and failed files.");
+                    return;
+                }
+
+                if ((moveSuccess && !string.IsNullOrEmpty(successFolder) && successFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)) ||
+                    (moveFailed && !string.IsNullOrEmpty(failedFolder) && failedFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ShowError("Please select Success/Failed folders that are different from the Input folder.");
+                    return;
+                }
+
+                if (_cts.IsCancellationRequested) _cts.Dispose();
+                _cts = new CancellationTokenSource();
+
+                ResetOperationStats();
+                SetControlsState(false);
+                _operationTimer.Restart();
+
+                LogMessage("--- Starting batch verification process... ---");
+                LogMessage($"Input folder: {inputFolder}");
+                LogMessage($"Include subfolders: {includeSubfolders}");
+                if (moveSuccess) LogMessage($"Moving successful files to: {successFolder}");
+                if (moveFailed) LogMessage($"Moving failed files to: {failedFolder}");
+
+                try
+                {
+                    await PerformBatchVerificationAsync(inputFolder, includeSubfolders, moveSuccess, successFolder, moveFailed, failedFolder, _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    LogMessage("Verification operation was canceled by user.");
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Error during batch verification: {ex.Message}");
+                    _ = ReportBugAsync("Error during batch verification process", ex);
+                }
+                finally
+                {
+                    _operationTimer.Stop();
+                    UpdateProcessingTimeDisplay();
+                    UpdateWriteSpeedDisplay(0);
+                    SetControlsState(true);
+                    LogOperationSummary("Verification");
+                }
             }
             catch (Exception ex)
             {
-                LogMessage($"Error during batch verification: {ex.Message}");
                 _ = ReportBugAsync("Error during batch verification process", ex);
-            }
-            finally
-            {
-                _operationTimer.Stop();
-                UpdateProcessingTimeDisplay();
-                UpdateWriteSpeedDisplay(0);
-                SetControlsState(true);
-                LogOperationSummary("Verification");
             }
         }
         catch (Exception ex)
@@ -367,7 +433,7 @@ public partial class MainWindow : IDisposable
         BrowseCompressionInputButton.IsEnabled = enabled;
         CompressionOutputFolderTextBox.IsEnabled = enabled;
         BrowseCompressionOutputButton.IsEnabled = enabled;
-        Format7ZRadioButton.IsEnabled = enabled && _isSevenZipAvailable;
+        Format7ZRadioButton.IsEnabled = enabled;
         FormatZipRadioButton.IsEnabled = enabled;
         DeleteOriginalsCheckBox.IsEnabled = enabled;
         ParallelProcessingCheckBox.IsEnabled = enabled;
@@ -456,15 +522,7 @@ public partial class MainWindow : IDisposable
                 return false;
             }
 
-            bool compressionSuccessful;
-            if (outputFormat == ".zip")
-            {
-                compressionSuccessful = await CompressToZipAsync(inputFile, outputFilePath, token);
-            }
-            else
-            {
-                compressionSuccessful = await CompressTo7ZAsync(inputFile, outputFilePath, token);
-            }
+            var compressionSuccessful = await CompressWithLibraryAsync(inputFile, outputFilePath, outputFormat, token);
 
             token.ThrowIfCancellationRequested();
 
@@ -609,134 +667,6 @@ public partial class MainWindow : IDisposable
         }
     }
 
-    private async Task<bool> CompressToZipAsync(string inputFile, string outputZipFile, CancellationToken token)
-    {
-        try
-        {
-            await Task.Run(() =>
-            {
-                token.ThrowIfCancellationRequested();
-                using var archive = ZipFile.Open(outputZipFile, ZipArchiveMode.Create);
-                token.ThrowIfCancellationRequested();
-                archive.CreateEntryFromFile(inputFile, Path.GetFileName(inputFile), CompressionLevel.Optimal);
-            }, token);
-            return await Task.Run(() => File.Exists(outputZipFile), token);
-        }
-        catch (Exception ex)
-        {
-            LogMessage($"Error creating zip file {Path.GetFileName(outputZipFile)}: {ex.Message}");
-            return false;
-        }
-    }
-
-    private async Task<bool> CompressTo7ZAsync(string inputFile, string output7ZFile, CancellationToken token)
-    {
-        using var process = new Process();
-        try
-        {
-            token.ThrowIfCancellationRequested();
-            var arguments = $"a -t7z \"{output7ZFile}\" \"{inputFile}\" -y";
-
-            process.StartInfo = new ProcessStartInfo
-            {
-                FileName = _sevenZipPath,
-                Arguments = arguments,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            process.EnableRaisingEvents = true;
-
-            process.OutputDataReceived += (_, args) =>
-            {
-                if (!string.IsNullOrEmpty(args.Data)) LogMessage($"[7-ZIP STDOUT] {args.Data}");
-            };
-            process.ErrorDataReceived += (_, args) =>
-            {
-                if (!string.IsNullOrEmpty(args.Data)) LogMessage($"[7-ZIP STDERR] {args.Data}");
-            };
-
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            var lastSpeedCheckTime = DateTime.UtcNow;
-            long lastFileSize = 0;
-
-            while (!process.HasExited)
-            {
-                if (token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        if (!process.HasExited) process.Kill(true);
-                    }
-                    catch
-                    {
-                        /* ignore */
-                    }
-
-                    token.ThrowIfCancellationRequested();
-                }
-
-                await Task.Delay(WriteSpeedUpdateIntervalMs, token);
-                if (process.HasExited || token.IsCancellationRequested) break;
-
-                try
-                {
-                    if (await Task.Run(() => File.Exists(output7ZFile), token))
-                    {
-                        var currentFileSize = await Task.Run(() => new FileInfo(output7ZFile).Length, token);
-                        var currentTime = DateTime.UtcNow;
-                        var timeDelta = currentTime - lastSpeedCheckTime;
-
-                        if (timeDelta.TotalSeconds > 0)
-                        {
-                            var bytesDelta = currentFileSize - lastFileSize;
-                            var speed = (bytesDelta / timeDelta.TotalSeconds) / (1024.0 * 1024.0);
-                            UpdateWriteSpeedDisplay(speed);
-                        }
-
-                        lastFileSize = currentFileSize;
-                        lastSpeedCheckTime = currentTime;
-                    }
-                }
-                catch (FileNotFoundException)
-                {
-                    /* File might not be created yet */
-                }
-                catch (Exception ex)
-                {
-                    LogMessage($"Write speed monitoring error: {ex.Message}");
-                }
-            }
-
-            await process.WaitForExitAsync(token);
-            return process.ExitCode == 0;
-        }
-        catch (OperationCanceledException)
-        {
-            LogMessage("7z compression operation was canceled by user.");
-            try
-            {
-                if (!process.HasExited) process.Kill(true);
-            }
-            catch
-            {
-                /* ignore */
-            }
-
-            throw;
-        }
-        catch (Exception ex)
-        {
-            LogMessage($"Error running 7z.exe for {Path.GetFileName(inputFile)}: {ex.Message}");
-            _ = ReportBugAsync($"Error running 7z.exe for {Path.GetFileName(inputFile)}", ex);
-            return false;
-        }
-    }
-
     private async Task<bool> VerifyArchiveAsync(string archivePath, CancellationToken token)
     {
         try
@@ -744,27 +674,9 @@ public partial class MainWindow : IDisposable
             return await Task.Run(() =>
             {
                 token.ThrowIfCancellationRequested();
-                using var archiveFile = new ArchiveFile(archivePath);
-
-                // To verify the archive, we attempt to extract every file to a null stream.
-                // This forces the library to decompress the data and perform CRC checks.
-                // An exception will be thrown if any entry is corrupt.
-                foreach (var entry in archiveFile.Entries)
-                {
-                    token.ThrowIfCancellationRequested();
-
-                    // --- FIX ---
-                    // The 'Attributes' property is a non-nullable uint.
-                    // We perform a bitwise AND to check if the Directory flag is set.
-                    if ((entry.Attributes & (uint)FileAttributes.Directory) != 0)
-                    {
-                        continue;
-                    }
-
-                    entry.Extract(Stream.Null);
-                }
-
-                return true; // If no exceptions were thrown, the archive is considered valid.
+                using var extractor = new SevenZipExtractor(archivePath);
+                // Test the entire archive integrity
+                return extractor.Check();
             }, token);
         }
         catch (OperationCanceledException)
@@ -774,12 +686,11 @@ public partial class MainWindow : IDisposable
         }
         catch (Exception ex)
         {
-            // This is the expected path for a corrupt archive. Log the failure and return false.
-            LogMessage($"Error during verification of {Path.GetFileName(archivePath)}: {ex.Message}");
-            // This is not an application bug, so we don't send a bug report.
+            LogMessage($"Verification failed for {Path.GetFileName(archivePath)}: {ex.Message}");
             return false;
         }
     }
+
 
     private void ResetOperationStats()
     {
