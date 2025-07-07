@@ -14,8 +14,6 @@ namespace BatchConvertToCompressedFile;
 public partial class MainWindow : IDisposable
 {
     private CancellationTokenSource _cts;
-    private readonly bool _isSevenZipDllAvailable;
-
     private static readonly string[] AllSupportedVerificationExtensions = { ".zip", ".7z", ".rar" };
 
     // Statistics
@@ -36,34 +34,97 @@ public partial class MainWindow : IDisposable
     {
         InitializeComponent();
         _cts = new CancellationTokenSource();
-        var appDirectory = AppDomain.CurrentDomain.BaseDirectory;
-        var sevenZipDllPath = Path.Combine(appDirectory, "7z.dll");
-        _isSevenZipDllAvailable = File.Exists(sevenZipDllPath);
-        if (_isSevenZipDllAvailable)
-        {
-            try
-            {
-                SevenZipBase.SetLibraryPath(sevenZipDllPath);
-            }
-            catch (Exception ex)
-            {
-                _isSevenZipDllAvailable = false;
-                LogMessage(
-                    $"FATAL: Failed to load 7z.dll. Compression and verification will be disabled. Error: {ex.Message}");
-                Task.Run(() => Task.FromResult(_ = ReportBugAsync($"Failed to load 7z.dll: {ex.Message}", ex)));
-            }
-        }
-
-        if (!_isSevenZipDllAvailable)
-        {
-            CompressTab.IsEnabled = false;
-            VerifyTab.IsEnabled = false;
-            LogMessage(
-                "CRITICAL: 7z.dll is required for all operations. Application functionality is severely limited.");
-        }
 
         DisplayCompressionInstructionsInLog();
         ResetOperationStats();
+        SetVersionInStatusBar();
+    }
+
+    private void SetVersionInStatusBar()
+    {
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = $"Version: {version?.ToString() ?? "Unknown"}";
+    }
+
+    private void UpdateStatus(string message)
+    {
+        Application.Current.Dispatcher.InvokeAsync(() => { StatusText.Text = message; });
+    }
+
+    private void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        // Check for updates silently on startup.
+        _ = CheckForUpdatesAsync(false);
+    }
+
+    private void CheckForUpdatesMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        // Manually check for updates and show a message regardless of the outcome.
+        _ = CheckForUpdatesAsync(true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool isManualCheck)
+    {
+        if (isManualCheck)
+        {
+            LogMessage("Checking for updates...");
+            UpdateStatus("Checking for updates...");
+        }
+
+        try
+        {
+            var updateChecker = new UpdateChecker(AppConfig.UpdateCheckUrl);
+            var updateResult = await updateChecker.CheckForUpdateAsync();
+
+            if (updateResult is { IsNewVersionAvailable: true, ReleaseUrl: not null })
+            {
+                var message = $"A new version ({updateResult.LatestVersion}) is available. Would you like to go to the download page?";
+                var result = MessageBox.Show(this, message, "Update Available", MessageBoxButton.YesNo, MessageBoxImage.Information);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    try
+                    {
+                        // Open the release URL in the default browser
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = updateResult.ReleaseUrl,
+                            UseShellExecute = true
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        var errorMsg = $"Could not open the download page: {ex.Message}";
+                        LogMessage(errorMsg);
+                        ShowError(errorMsg);
+                    }
+                }
+            }
+            else if (isManualCheck)
+            {
+                LogMessage("Application is up-to-date.");
+                MessageBox.Show(this, "You are using the latest version.", "No Updates Found", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+        catch (Exception ex)
+        {
+            var errorMsg = $"Could not check for updates: {ex.Message}";
+            LogMessage(errorMsg);
+            if (isManualCheck)
+            {
+                ShowError(errorMsg);
+            }
+
+            // Silently fail on automatic check, but log the error.
+            _ = ReportBugAsync("Failed to check for updates", ex);
+        }
+        finally
+        {
+            if (isManualCheck)
+            {
+                UpdateStatus("Ready");
+            }
+        }
     }
 
     private void StartWriteSpeedTracking()
@@ -136,17 +197,6 @@ public partial class MainWindow : IDisposable
         LogMessage("4. Choose whether to delete original files after compression.");
         LogMessage("5. Click 'Start Compression' to begin the process.");
         LogMessage("");
-        if (_isSevenZipDllAvailable)
-        {
-            LogMessage("7z.dll found. Compression (.7z and .zip) and verification are available.");
-        }
-        else
-        {
-            LogMessage("CRITICAL: 7z.dll not found in the application directory!");
-            LogMessage("All compression and verification features are disabled.");
-            Format7ZRadioButton.IsEnabled = false;
-            FormatZipRadioButton.IsChecked = false;
-        }
 
         LogMessage("--- Ready for Compression ---");
     }
@@ -201,18 +251,6 @@ public partial class MainWindow : IDisposable
         LogMessage("3. Optionally, move successfully/failed tested files to other folders.");
         LogMessage("4. Click 'Start Verification' to begin the process.");
         LogMessage("");
-        if (_isSevenZipDllAvailable)
-        {
-            LogMessage("Using 7-Zip library (7z.dll) for verification.");
-        }
-        else
-        {
-            LogMessage("WARNING: 7z.dll not found in the application directory! Verification is disabled.");
-            Task.Run(() =>
-                Task.FromResult(_ =
-                    ReportBugAsync("7z.dll not found on startup. This will prevent archive verification.")));
-        }
-
         LogMessage("--- Ready for Verification ---");
     }
 
@@ -235,6 +273,7 @@ public partial class MainWindow : IDisposable
             }
         }
 
+        UpdateStatus("Ready");
         UpdateWriteSpeedDisplay(0);
     }
 
@@ -342,6 +381,7 @@ public partial class MainWindow : IDisposable
             SetControlsState(false);
             _operationTimer.Restart();
             StartWriteSpeedTracking();
+            UpdateStatus("Starting batch compression...");
             LogMessage("--- Starting batch compression process... ---");
             LogMessage($"Input folder: {inputFolder}");
             LogMessage($"Output folder: {outputFolder}");
@@ -354,10 +394,12 @@ public partial class MainWindow : IDisposable
             catch (OperationCanceledException)
             {
                 LogMessage("Compression operation was canceled by user.");
+                UpdateStatus("Operation canceled.");
             }
             catch (Exception ex)
             {
                 LogMessage($"Error during batch compression: {ex.Message}");
+                UpdateStatus("Error during compression. See log for details.");
                 _ = ReportBugAsync("Error during batch compression process", ex);
             }
             finally
@@ -379,93 +421,83 @@ public partial class MainWindow : IDisposable
     {
         try
         {
-            if (!_isSevenZipDllAvailable)
+            await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
+            DisplayVerificationInstructionsInLog();
+            var inputFolder = VerificationInputFolderTextBox.Text;
+            var includeSubfolders = VerificationIncludeSubfoldersCheckBox.IsChecked ?? false;
+            var moveSuccess = MoveSuccessFilesCheckBox.IsChecked == true;
+            var successFolder = SuccessFolderTextBox.Text;
+            var moveFailed = MoveFailedFilesCheckBox.IsChecked == true;
+            var failedFolder = FailedFolderTextBox.Text;
+            if (string.IsNullOrEmpty(inputFolder))
             {
-                ShowError("7z.dll is missing or could not be loaded. Cannot perform verification.");
+                ShowError("Please select the input folder containing archives to verify.");
                 return;
             }
 
+            if (moveSuccess && string.IsNullOrEmpty(successFolder))
+            {
+                ShowError("Please select a Success Folder or uncheck the option to move successful files.");
+                return;
+            }
+
+            if (moveFailed && string.IsNullOrEmpty(failedFolder))
+            {
+                ShowError("Please select a Failed Folder or uncheck the option to move failed files.");
+                return;
+            }
+
+            if (moveSuccess && moveFailed && !string.IsNullOrEmpty(successFolder) &&
+                successFolder.Equals(failedFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowError("Please select different folders for successful and failed files.");
+                return;
+            }
+
+            if ((moveSuccess && !string.IsNullOrEmpty(successFolder) &&
+                 successFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)) ||
+                (moveFailed && !string.IsNullOrEmpty(failedFolder) &&
+                 failedFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)))
+            {
+                ShowError("Please select Success/Failed folders that are different from the Input folder.");
+                return;
+            }
+
+            if (_cts.IsCancellationRequested) _cts.Dispose();
+            _cts = new CancellationTokenSource();
+            ResetOperationStats();
+            SetControlsState(false);
+            _operationTimer.Restart();
+            StartWriteSpeedTracking();
+            UpdateStatus("Starting batch verification...");
+            LogMessage("--- Starting batch verification process... ---");
+            LogMessage($"Input folder: {inputFolder}");
+            LogMessage($"Include subfolders: {includeSubfolders}");
+            if (moveSuccess) LogMessage($"Moving successful files to: {successFolder}");
+            if (moveFailed) LogMessage($"Moving failed files to: {failedFolder}");
             try
             {
-                await Application.Current.Dispatcher.InvokeAsync(() => LogViewer.Clear());
-                DisplayVerificationInstructionsInLog();
-                var inputFolder = VerificationInputFolderTextBox.Text;
-                var includeSubfolders = VerificationIncludeSubfoldersCheckBox.IsChecked ?? false;
-                var moveSuccess = MoveSuccessFilesCheckBox.IsChecked == true;
-                var successFolder = SuccessFolderTextBox.Text;
-                var moveFailed = MoveFailedFilesCheckBox.IsChecked == true;
-                var failedFolder = FailedFolderTextBox.Text;
-                if (string.IsNullOrEmpty(inputFolder))
-                {
-                    ShowError("Please select the input folder containing archives to verify.");
-                    return;
-                }
-
-                if (moveSuccess && string.IsNullOrEmpty(successFolder))
-                {
-                    ShowError("Please select a Success Folder or uncheck the option to move successful files.");
-                    return;
-                }
-
-                if (moveFailed && string.IsNullOrEmpty(failedFolder))
-                {
-                    ShowError("Please select a Failed Folder or uncheck the option to move failed files.");
-                    return;
-                }
-
-                if (moveSuccess && moveFailed && !string.IsNullOrEmpty(successFolder) &&
-                    successFolder.Equals(failedFolder, StringComparison.OrdinalIgnoreCase))
-                {
-                    ShowError("Please select different folders for successful and failed files.");
-                    return;
-                }
-
-                if ((moveSuccess && !string.IsNullOrEmpty(successFolder) &&
-                     successFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)) ||
-                    (moveFailed && !string.IsNullOrEmpty(failedFolder) &&
-                     failedFolder.Equals(inputFolder, StringComparison.OrdinalIgnoreCase)))
-                {
-                    ShowError("Please select Success/Failed folders that are different from the Input folder.");
-                    return;
-                }
-
-                if (_cts.IsCancellationRequested) _cts.Dispose();
-                _cts = new CancellationTokenSource();
-                ResetOperationStats();
-                SetControlsState(false);
-                _operationTimer.Restart();
-                StartWriteSpeedTracking();
-                LogMessage("--- Starting batch verification process... ---");
-                LogMessage($"Input folder: {inputFolder}");
-                LogMessage($"Include subfolders: {includeSubfolders}");
-                if (moveSuccess) LogMessage($"Moving successful files to: {successFolder}");
-                if (moveFailed) LogMessage($"Moving failed files to: {failedFolder}");
-                try
-                {
-                    await PerformBatchVerificationAsync(inputFolder, includeSubfolders, moveSuccess, successFolder,
-                        moveFailed, failedFolder, _cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    LogMessage("Verification operation was canceled by user.");
-                }
-                catch (Exception ex)
-                {
-                    LogMessage($"Error during batch verification: {ex.Message}");
-                    _ = ReportBugAsync("Error during batch verification process", ex);
-                }
-                finally
-                {
-                    _operationTimer.Stop();
-                    StopWriteSpeedTracking();
-                    UpdateProcessingTimeDisplay();
-                    SetControlsState(true);
-                    LogOperationSummary("Verification");
-                }
+                await PerformBatchVerificationAsync(inputFolder, includeSubfolders, moveSuccess, successFolder,
+                    moveFailed, failedFolder, _cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("Verification operation was canceled by user.");
+                UpdateStatus("Operation canceled.");
             }
             catch (Exception ex)
             {
+                LogMessage($"Error during batch verification: {ex.Message}");
+                UpdateStatus("Error during verification. See log for details.");
                 _ = ReportBugAsync("Error during batch verification process", ex);
+            }
+            finally
+            {
+                _operationTimer.Stop();
+                StopWriteSpeedTracking();
+                UpdateProcessingTimeDisplay();
+                SetControlsState(true);
+                LogOperationSummary("Verification");
             }
         }
         catch (Exception ex)
@@ -478,6 +510,7 @@ public partial class MainWindow : IDisposable
     {
         _cts.Cancel();
         LogMessage("Cancellation requested. Waiting for current operation(s) to complete...");
+        UpdateStatus("Cancellation requested...");
     }
 
     private void SetControlsState(bool enabled)
@@ -510,6 +543,7 @@ public partial class MainWindow : IDisposable
 
         ClearProgressDisplay();
         UpdateWriteSpeedDisplay(0);
+        UpdateStatus("Ready");
     }
 
     private static string? SelectFolder(string description)
@@ -895,6 +929,7 @@ public partial class MainWindow : IDisposable
         UpdateProcessingTimeDisplay();
         UpdateWriteSpeedDisplay(0);
         ClearProgressDisplay();
+        UpdateStatus("Ready");
     }
 
     private void UpdateStatsDisplay()

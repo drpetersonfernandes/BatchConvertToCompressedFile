@@ -29,7 +29,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="7z.dll">
+    <None Update="7z_arm64.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="7z_x64.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="7z_x86.dll">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>

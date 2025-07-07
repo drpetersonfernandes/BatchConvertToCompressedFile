@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Batch Compress &amp; Verify Tool" 
         Height="700" Width="900" MinHeight="650" MinWidth="700" 
+        Loaded="Window_Loaded"
         Closing="Window_Closing"
         WindowStartupLocation="CenterScreen">
     <Grid>
@@ -13,6 +14,7 @@
             <RowDefinition Height="Auto"/> <!-- Stats Panel -->
             <RowDefinition Height="Auto"/> <!-- ProgressText -->
             <RowDefinition Height="Auto"/> <!-- ProgressBar Grid -->
+            <RowDefinition Height="Auto"/> <!-- StatusBar -->
         </Grid.RowDefinitions>
         
         <Menu Grid.Row="0">
@@ -29,6 +31,8 @@
                         <Image Source="pack://application:,,,/images/about.png" Width="16" Height="16" />
                     </MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="Check for Updates" Click="CheckForUpdatesMenuItem_Click"/>
             </MenuItem>
         </Menu>
 
@@ -180,5 +184,14 @@
             <ProgressBar x:Name="ProgressBar" Height="25" Grid.Column="0" Visibility="Collapsed"/>
             <Button x:Name="CancelButton" Content="Cancel" Width="100" Height="25" Grid.Column="1" Margin="10,0,0,0" Visibility="Collapsed" Click="CancelButton_Click"/>
         </Grid>
+
+        <StatusBar Grid.Row="6">
+            <StatusBarItem>
+                <TextBlock x:Name="StatusText" Text="Ready" Margin="2,0"/>
+            </StatusBarItem>
+            <StatusBarItem HorizontalAlignment="Right">
+                <TextBlock x:Name="VersionText" Margin="2,0"/>
+            </StatusBarItem>
+        </StatusBar>
     </Grid>
 </Window>
