@@ -467,10 +467,15 @@ public partial class MainWindow : IDisposable
                 return;
             }
 
-            if (_cts.IsCancellationRequested) _cts.Dispose();
-            _cts = new CancellationTokenSource();
-            ResetOperationStats();
+            // 1. Disable controls immediately to prevent re-entry.
             SetControlsState(false);
+
+            // 2. Safely recreate the CancellationTokenSource.
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            // 3. Reset stats and start the operation.
+            ResetOperationStats();
             _operationTimer.Restart();
             StartWriteSpeedTracking();
             UpdateStatus("Starting batch verification...");
@@ -626,7 +631,7 @@ public partial class MainWindow : IDisposable
                     _failedCount++;
                     break;
                 case ProcessStatus.Skipped:
-                    // Do nothing, or you could add a "Skipped" counter.
+                    // Do nothing with counters for skipped files.
                     break;
             }
 
