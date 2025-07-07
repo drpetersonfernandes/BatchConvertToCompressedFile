@@ -7,14 +7,15 @@ A Windows desktop utility for batch compressing files to `.7z` or `.zip` formats
 ## Overview
 Batch Convert to Compressed File is a Windows application that provides a simple user interface for compressing multiple files into individual archives and verifying the integrity of existing compressed files.
 
-## Features
-- **Batch Compression**: Compress multiple files into individual archives in a single operation.
-- **Multiple Format Support**: Create `.7z` archives or `.zip` archives.
-- **Archive Verification**: Verify the integrity of `.7z`, `.zip`, and `.rar` archives with comprehensive CRC checking.
-- **Progress Tracking**: Detailed progress indication, real-time logging, and write speed monitoring during operations.
-- **Delete Original Option**: Option to remove source files after successful compression.
-- **File Organization**: Automatically move verified archives to "Success" or "Failed" folders.
-- **User-Friendly Interface**: Simple and intuitive tabbed Windows interface with real-time statistics.
+## Key Features
+- **Batch Compression**: Compress multiple files into individual archives in a single operation
+- **Multiple Format Support**: Create `.7z` or `.zip` archives
+- **Comprehensive Archive Verification**: Verify integrity of `.7z`, `.zip`, and `.rar` archives with detailed CRC checking
+- **Real-time Progress Tracking**: Detailed progress indicators, logging, and write speed monitoring
+- **Flexible File Management**:
+  - Option to delete original files after compression
+  - Automatically move verified archives to "Success" or "Failed" folders
+- **User-Friendly Interface**: Intuitive, clean Windows application with real-time statistics
 
 ## Supported File Formats
 
@@ -30,7 +31,7 @@ Batch Convert to Compressed File is a Windows application that provides a simple
 ## Requirements
 - Windows 7 or later
 - [.NET 9.0 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)
-- `7z.dll` (included with the application)
+- Included `7z.dll` (multi-architecture support)
 
 ## Installation
 1. Download the latest release.
