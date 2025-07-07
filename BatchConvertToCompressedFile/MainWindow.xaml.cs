@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using BatchConvertToCompressedFile.models;
 using Microsoft.Win32;
 using SevenZip;
 
@@ -53,7 +54,7 @@ public partial class MainWindow : IDisposable
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        // Check for updates silently on startup.
+        // Check for updates on startup. This is silent if no update is found.
         _ = CheckForUpdatesAsync(false);
     }
 
@@ -65,15 +66,12 @@ public partial class MainWindow : IDisposable
 
     private async Task CheckForUpdatesAsync(bool isManualCheck)
     {
-        if (isManualCheck)
-        {
-            LogMessage("Checking for updates...");
-            UpdateStatus("Checking for updates...");
-        }
+        LogMessage("Checking for updates...");
+        UpdateStatus("Checking for updates...");
 
         try
         {
-            var updateChecker = new UpdateChecker(AppConfig.UpdateCheckUrl);
+            using var updateChecker = new UpdateChecker(AppConfig.UpdateCheckUrl);
             var updateResult = await updateChecker.CheckForUpdateAsync();
 
             if (updateResult is { IsNewVersionAvailable: true, ReleaseUrl: not null })
@@ -100,10 +98,13 @@ public partial class MainWindow : IDisposable
                     }
                 }
             }
-            else if (isManualCheck)
+            else
             {
                 LogMessage("Application is up-to-date.");
-                MessageBox.Show(this, "You are using the latest version.", "No Updates Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                if (isManualCheck)
+                {
+                    MessageBox.Show(this, "You are using the latest version.", "No Updates Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
         }
         catch (Exception ex)
@@ -120,10 +121,7 @@ public partial class MainWindow : IDisposable
         }
         finally
         {
-            if (isManualCheck)
-            {
-                UpdateStatus("Ready");
-            }
+            UpdateStatus("Ready");
         }
     }
 
@@ -197,8 +195,8 @@ public partial class MainWindow : IDisposable
         LogMessage("4. Choose whether to delete original files after compression.");
         LogMessage("5. Click 'Start Compression' to begin the process.");
         LogMessage("");
-
         LogMessage("--- Ready for Compression ---");
+        LogMessage("");
     }
 
     private async Task<bool> CompressWithLibraryAsync(string inputFile, string outputFile, string format,
@@ -375,11 +373,17 @@ public partial class MainWindow : IDisposable
                 return;
             }
 
-            if (_cts.IsCancellationRequested) _cts.Dispose();
-            _cts = new CancellationTokenSource();
-            ResetOperationStats();
+            // 1. Disable controls immediately to prevent re-entry.
             SetControlsState(false);
+
+            // 2. Safely recreate the CancellationTokenSource.
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            // 3. Reset stats and start the operation.
+            ResetOperationStats();
             _operationTimer.Restart();
+
             StartWriteSpeedTracking();
             UpdateStatus("Starting batch compression...");
             LogMessage("--- Starting batch compression process... ---");
@@ -610,16 +614,20 @@ public partial class MainWindow : IDisposable
             var fileName = Path.GetFileName(inputFile);
             UpdateProgressDisplay(filesActuallyProcessedCount + 1, _totalFilesProcessed, fileName, "Compressing");
 
-            var success =
+            var status =
                 await ProcessSingleFileForCompressionAsync(inputFile, outputFolder, deleteFiles, outputFormat, token);
 
-            if (success)
+            switch (status)
             {
-                _processedOkCount++;
-            }
-            else
-            {
-                _failedCount++;
+                case ProcessStatus.Success:
+                    _processedOkCount++;
+                    break;
+                case ProcessStatus.Failed:
+                    _failedCount++;
+                    break;
+                case ProcessStatus.Skipped:
+                    // Do nothing, or you could add a "Skipped" counter.
+                    break;
             }
 
             filesActuallyProcessedCount++;
@@ -628,7 +636,7 @@ public partial class MainWindow : IDisposable
         }
     }
 
-    private async Task<bool> ProcessSingleFileForCompressionAsync(string inputFile, string outputFolder,
+    private async Task<ProcessStatus> ProcessSingleFileForCompressionAsync(string inputFile, string outputFolder,
         bool deleteOriginal, string outputFormat, CancellationToken token)
     {
         var originalFileName = Path.GetFileName(inputFile);
@@ -642,7 +650,7 @@ public partial class MainWindow : IDisposable
             {
                 LogMessage(
                     $"Skipping {originalFileName}: Output file {Path.GetFileName(outputFilePath)} already exists.");
-                return false;
+                return ProcessStatus.Skipped;
             }
 
             var compressionSuccessful = await CompressWithLibraryAsync(inputFile, outputFilePath, outputFormat, token);
@@ -655,13 +663,13 @@ public partial class MainWindow : IDisposable
                     await TryDeleteFileAsync(inputFile, "original file", token);
                 }
 
-                return true;
+                return ProcessStatus.Success;
             }
             else
             {
                 LogMessage($"Failed to compress {originalFileName}.");
                 await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
-                return false;
+                return ProcessStatus.Failed;
             }
         }
         catch (OperationCanceledException)
@@ -675,7 +683,7 @@ public partial class MainWindow : IDisposable
             LogMessage($"Error compressing file {originalFileName}: {ex.Message}");
             _ = ReportBugAsync($"Error compressing file: {originalFileName}", ex);
             await TryDeleteFileAsync(outputFilePath, "partially created archive", CancellationToken.None);
-            return false;
+            return ProcessStatus.Failed;
         }
     }
 
