@@ -29,8 +29,7 @@ Batch Convert to Compressed File is a Windows application that provides a simple
 - **.rar files** (RAR archives)
 
 ## Requirements
-- Windows 7 or later
-- [.NET 9.0 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10.0 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)
 - Included `7z.dll` (multi-architecture support)
 
 ## Installation
