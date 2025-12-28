@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -819,7 +819,6 @@ public partial class MainWindow : IDisposable
         bool maintainSubfolders, string moveReason, CancellationToken token)
     {
         var fileName = Path.GetFileName(sourceFile);
-        string destinationFile;
         try
         {
             token.ThrowIfCancellationRequested();
@@ -836,7 +835,7 @@ public partial class MainWindow : IDisposable
                 targetDir = destinationParentFolder;
             }
 
-            destinationFile = Path.Combine(targetDir, fileName);
+            var destinationFile = Path.Combine(targetDir, fileName);
             if (!await Task.Run(() => Directory.Exists(targetDir), token))
             {
                 await Task.Run(() => Directory.CreateDirectory(targetDir), token);
@@ -850,9 +849,23 @@ public partial class MainWindow : IDisposable
                 return;
             }
 
-            token.ThrowIfCancellationRequested();
-            await Task.Run(() => File.Move(sourceFile, destinationFile), token);
-            LogMessage($"Moved {fileName} ({moveReason}) to {destinationFile}");
+            const int maxRetries = 5;
+            const int delayMilliseconds = 300;
+            for (var i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    await Task.Run(() => File.Move(sourceFile, destinationFile), token);
+                    LogMessage($"Moved {fileName} ({moveReason}) to {destinationFile}");
+                    return; // Success
+                }
+                catch (IOException) when (i < maxRetries - 1)
+                {
+                    LogMessage($"Could not move file '{fileName}' as it is in use. Retrying in {delayMilliseconds}ms... (Attempt {i + 1}/{maxRetries})");
+                    await Task.Delay(delayMilliseconds, token);
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -861,7 +874,13 @@ public partial class MainWindow : IDisposable
         }
         catch (Exception ex)
         {
-            LogMessage($"Error moving {fileName} to {destinationParentFolder}: {ex.Message}");
+            var specificError = ex switch
+            {
+                UnauthorizedAccessException => "Permission denied.",
+                IOException => "The file is in use by another process and could not be moved after several retries.",
+                _ => ex.Message
+            };
+            LogMessage($"Error moving {fileName} to {destinationParentFolder}: {specificError}");
             _ = ReportBugAsync($"Error moving verified file {fileName}", ex);
         }
     }
